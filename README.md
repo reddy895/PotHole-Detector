@@ -1,6 +1,6 @@
-# AI-Powered Pothole Detection System (Terminal Edition)
+# AI-Powered Pothole Detection System
 
-A high-performance, real-time computer vision application built with **Python**, **Ultralytics YOLO**, and **OpenCV** to detect and highlight road potholes from live webcams, images, and recorded road videos directly from your terminal.
+A high-performance, real-time computer vision application built with **Python**, **Ultralytics YOLO**, and **OpenCV** to detect and highlight road potholes from live webcams, images, and recorded road videos — available as both a **terminal CLI** and a **Flask web interface**.
 
 ---
 
@@ -38,27 +38,49 @@ python main.py --source video --input road.mp4
 
 ---
 
+## 🌐 Web Interface (Flask)
+
+Run the browser-based dashboard for live webcam detection or video upload:
+
+```bash
+bash run_web.sh
+# or manually:
+python app.py
+```
+
+Then open **http://localhost:5000** in your browser.
+
+- **Live Webcam** — real-time MJPEG stream with annotated detections
+- **Video Upload** — upload a `.mp4` file and watch frame-by-frame inference streamed back
+
+---
+
 ## 📁 Project Structure
 
 ```
 PotHole/
-├── main.py              # Application CLI entrypoint (webcam, image, video dispatch)
-├── detector.py          # Decoupled YOLO pothole inference engine & OpenCV visual rendering
-├── config.py            # Centralized system configurations, model paths, and device selector
+├── main.py              # CLI entrypoint (webcam / image / video)
+├── app.py               # Flask web application (MJPEG streams)
+├── detector.py          # YOLO inference engine & OpenCV rendering
+├── config.py            # Centralized configuration & device selector
 ├── requirements.txt     # Python dependencies
-├── README.md            # System documentation and execution guide
+├── run.sh               # Quick-launch script for CLI mode
+├── run_web.sh           # Quick-launch script for web mode
+├── README.md            # Documentation
 │
 ├── models/
-│   └── pothole.pt       # Trained YOLO pothole weights
+│   └── pothole.pt       # Trained YOLO weights (download separately)
 │
-├── outputs/             # Output directory for annotated images and processed videos
+├── templates/
+│   └── index.html       # Flask web UI template
+│
+├── outputs/             # Annotated images/videos (generated at runtime)
 │
 ├── utils/
 │   ├── __init__.py
-│   └── video_utils.py   # Stream I/O, terminal telemetry formatter, and file writer
+│   └── video_utils.py   # Stream I/O and terminal telemetry
 │
-├── road.jpg             # Pre-packaged sample road pothole image for instant testing
-└── road.mp4             # Pre-packaged sample road video for instant testing
+└── road.jpg             # Sample road image for instant testing
 ```
 
 ---

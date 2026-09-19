@@ -1,3 +1,4 @@
+#!/home/reddy895/Downloads/PotHole/.venv/bin/python
 """Terminal-Based AI Pothole Detection System.
 
 Main application entry point supporting Webcam, Image, and Video detection modes.
@@ -260,8 +261,84 @@ def run_webcam_mode(detector: PotholeDetector, cam_idx: int = 0, no_view: bool =
 # Main Execution Entrypoint
 # =========================================================================
 
+def _pick_file_dialog() -> str | None:
+    """Open a native file picker dialog and return selected path (or None)."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        import os
+        root = tk.Tk()
+        root.withdraw()          # hide the blank root window
+        root.attributes("-topmost", True)
+        file_path = filedialog.askopenfilename(
+            title="Select a Video File",
+            initialdir=os.path.expanduser("~"),   # start at home directory
+            filetypes=[
+                ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.m4v"),
+                ("All files", "*.*"),
+            ],
+        )
+        root.destroy()
+        return file_path if file_path else None
+    except Exception as e:
+        print(f"  [WARN] File dialog unavailable ({e}). Enter path manually.")
+        return None
+
+
+def interactive_menu() -> argparse.Namespace:
+    """Display interactive terminal menu and return populated Namespace."""
+    print()
+    print("=" * 48)
+    print("      AI POTHOLE DETECTION SYSTEM")
+    print("=" * 48)
+    print()
+    print("  Select detection mode:")
+    print()
+    print("  [1]  Live Video   — Real-time webcam detection")
+    print("  [2]  Video File   — Browse & detect from a video")
+    print()
+    print("=" * 48)
+
+    while True:
+        choice = input("  Enter choice (1 or 2): ").strip()
+        if choice in ("1", "2"):
+            break
+        print("  Invalid choice. Enter 1 or 2.")
+
+    ns = argparse.Namespace(model=None, conf=config.CONFIDENCE_THRESHOLD,
+                            cam_idx=config.DEFAULT_CAMERA_INDEX, no_view=False,
+                            source=None, input=None)
+
+    if choice == "1":
+        ns.source = "webcam"
+        cam_input = input(f"\n  Camera device index [default: 0]: ").strip()
+        ns.cam_idx = int(cam_input) if cam_input.isdigit() else 0
+    else:
+        ns.source = "video"
+        print("\n  Opening file browser... (select your video file)")
+        picked = _pick_file_dialog()
+        if picked:
+            print(f"  Selected: {picked}")
+            ns.input = picked
+        else:
+            # Fallback: manual entry
+            while True:
+                path_str = input("  Enter path to video file: ").strip().strip('"').strip("'")
+                if Path(path_str).is_file():
+                    ns.input = path_str
+                    break
+                print(f"  [ERROR] File not found: {path_str}. Try again.")
+
+    print()
+    return ns
+
+
 def main():
-    args = parse_arguments()
+    # If args were passed use the original argparse flow; otherwise show menu
+    if len(sys.argv) > 1:
+        args = parse_arguments()
+    else:
+        args = interactive_menu()
 
     # Input validation
     if args.source in ("image", "video") and not args.input:

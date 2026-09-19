@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Pothole Detection System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --accent: #f97316;
+      --accent2: #fb923c;
+      --bg: #09090b;
+      --surface: #111113;
+      --surface2: #18181b;
+      --border: #27272a;
+      --text: #fafafa;
+      --text-muted: #a1a1aa;
+      --green: #22c55e;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --radius: 16px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', system-ui, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ---- Background orbs ---- */
+    .bg-orbs {
+      position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      overflow: hidden;
+    }
+    .orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(90px);
+      opacity: 0.18;
+      animation: float 14s ease-in-out infinite;
+    }
+    .orb1 { width: 520px; height: 520px; background: #f97316; top: -180px; left: -120px; animation-delay: 0s; }
+    .orb2 { width: 400px; height: 400px; background: #6366f1; bottom: -150px; right: -100px; animation-delay: -7s; }
+    .orb3 { width: 280px; height: 280px; background: #22c55e; top: 40%; left: 50%; animation-delay: -3s; }
+    @keyframes float {
+      0%, 100% { transform: translateY(0) scale(1); }
+      50% { transform: translateY(-40px) scale(1.08); }
+    }
+
+    /* ---- Layout ---- */
+    .container { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 0 24px 64px; }
+
+    /* ---- Header ---- */
+    header {
+      text-align: center;
+      padding: 56px 0 40px;
+    }
+    .logo-row {
+      display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 16px;
+    }
+    .logo-icon {
+      width: 52px; height: 52px;
+      background: linear-gradient(135deg, var(--accent), #f43f5e);
+      border-radius: 14px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px;
+      box-shadow: 0 0 32px rgba(249,115,22,0.45);
+    }
+    h1 {
+      font-size: clamp(28px, 5vw, 42px);
+      font-weight: 800;
+      background: linear-gradient(135deg, #fff 40%, var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 16px;
+      font-weight: 400;
+      margin-top: 8px;
+    }
+
+    /* ---- Mode Tabs ---- */
+    .mode-tabs {
+      display: flex; gap: 12px; justify-content: center;
+      margin-bottom: 36px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 6px;
+      width: fit-content;
+      margin-left: auto; margin-right: auto;
+    }
+    .tab-btn {
+      padding: 12px 32px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 15px;
+      font-weight: 600;
+      transition: all 0.25s;
+      color: var(--text-muted);
+      background: transparent;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .tab-btn.active {
+      background: linear-gradient(135deg, var(--accent), #f43f5e);
+      color: #fff;
+      box-shadow: 0 4px 20px rgba(249,115,22,0.4);
+    }
+    .tab-btn:not(.active):hover { background: var(--surface2); color: var(--text); }
+
+    /* ---- Panels ---- */
+    .panel { display: none; animation: fadeIn 0.3s ease; }
+    .panel.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+    /* ---- Video Card ---- */
+    .video-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .video-header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 12px;
+    }
+    .video-title {
+      font-size: 17px; font-weight: 700;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .status-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--text-muted);
+      transition: background 0.3s;
+    }
+    .status-dot.live { background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse-dot 1.2s ease-in-out infinite; }
+    @keyframes pulse-dot { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+
+    .video-wrapper {
+      position: relative;
+      background: #000;
+      aspect-ratio: 16/9;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #webcam-feed, #video-feed {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: none;
+    }
+    .video-placeholder {
+      display: flex; flex-direction: column; align-items: center; gap: 16px;
+      color: var(--text-muted);
+      text-align: center;
+    }
+    .placeholder-icon { font-size: 64px; opacity: 0.35; }
+    .placeholder-text { font-size: 15px; font-weight: 500; }
+    .placeholder-sub { font-size: 13px; opacity: 0.6; }
+
+    /* ---- Controls ---- */
+    .controls {
+      padding: 20px 24px;
+      display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+    }
+    .btn {
+      padding: 12px 24px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.2s;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #f43f5e);
+      color: #fff;
+      box-shadow: 0 4px 16px rgba(249,115,22,0.35);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(249,115,22,0.5); }
+    .btn-secondary {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: var(--border); }
+    .btn-danger {
+      background: rgba(239,68,68,0.12);
+      color: var(--red);
+      border: 1px solid rgba(239,68,68,0.25);
+    }
+    .btn-danger:hover { background: rgba(239,68,68,0.2); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; }
+
+    /* ---- Upload Zone ---- */
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 14px;
+      padding: 40px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s;
+      margin: 0 24px 24px;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(249,115,22,0.05);
+    }
+    .upload-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.6; }
+    .upload-text { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+    .upload-sub { font-size: 13px; color: var(--text-muted); }
+    #video-file-input { display: none; }
+
+    /* ---- Progress ---- */
+    .upload-progress {
+      display: none;
+      margin: 0 24px 16px;
+    }
+    .progress-bar-track {
+      height: 6px;
+      background: var(--surface2);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #f43f5e);
+      border-radius: 99px;
+      width: 0%;
+      transition: width 0.3s;
+    }
+    .progress-label { font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
+
+    /* ---- Alert ---- */
+    .alert {
+      display: none;
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      margin: 0 24px 16px;
+      align-items: center; gap: 8px;
+    }
+    .alert.show { display: flex; }
+    .alert-success { background: rgba(34,197,94,0.12); color: var(--green); border: 1px solid rgba(34,197,94,0.25); }
+    .alert-error { background: rgba(239,68,68,0.12); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
+
+    /* ---- Info strip ---- */
+    .info-strip {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      padding: 0 24px 0;
+      margin-bottom: 24px;
+    }
+    .info-chip {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      color: var(--text-muted);
+      display: flex; align-items: center; gap: 6px;
+    }
+    .info-chip strong { color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="bg-orbs">
+    <div class="orb orb1"></div>
+    <div class="orb orb2"></div>
+    <div class="orb orb3"></div>
+  </div>
+
+  <div class="container">
+    <header>
+      <div class="logo-row">
+        <div class="logo-icon">🚧</div>
+        <h1>AI Pothole Detector</h1>
+      </div>
+      <p class="subtitle">Real-time road hazard detection powered by YOLO &amp; OpenCV</p>
+    </header>
+
+    <!-- Mode Tabs -->
+    <div class="mode-tabs">
+      <button class="tab-btn active" id="tab-live" onclick="switchTab('live')">
+        📹 Live Video
+      </button>
+      <button class="tab-btn" id="tab-upload" onclick="switchTab('upload')">
+        📂 Upload Video
+      </button>
+    </div>
+
+    <!-- ===================== LIVE VIDEO PANEL ===================== -->
+    <div class="panel active" id="panel-live">
+      <div class="video-card">
+        <div class="video-header">
+          <div class="video-title">
+            <div class="status-dot" id="webcam-dot"></div>
+            Live Webcam Detection
+          </div>
+          <div class="info-strip" style="margin:0; padding:0;">
+            <div class="info-chip">🎥 <strong>Webcam</strong></div>
+            <div class="info-chip">🤖 <strong>YOLO Real-time</strong></div>
+          </div>
+        </div>
+
+        <div class="video-wrapper">
+          <div class="video-placeholder" id="webcam-placeholder">
+            <div class="placeholder-icon">📷</div>
+            <div class="placeholder-text">Webcam preview</div>
+            <div class="placeholder-sub">Click "Start Camera" to begin live detection</div>
+          </div>
+          <img id="webcam-feed" src="" alt="Live Webcam Feed" />
+        </div>
+
+        <div class="controls">
+          <button class="btn btn-primary" id="btn-start-cam" onclick="startWebcam()">
+            ▶ Start Camera
+          </button>
+          <button class="btn btn-danger" id="btn-stop-cam" onclick="stopWebcam()" disabled>
+            ⏹ Stop Camera
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== VIDEO UPLOAD PANEL ===================== -->
+    <div class="panel" id="panel-upload">
+      <div class="video-card">
+        <div class="video-header">
+          <div class="video-title">
+            <div class="status-dot" id="video-dot"></div>
+            Video File Detection
+          </div>
+          <div class="info-chip" style="margin:0;">📁 <strong>Upload &amp; Analyze</strong></div>
+        </div>
+
+        <!-- Upload Zone -->
+        <div class="upload-zone" id="upload-zone"
+             onclick="document.getElementById('video-file-input').click()"
+             ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+          <div class="upload-icon">🎬</div>
+          <div class="upload-text">Drop your video here or click to browse</div>
+          <div class="upload-sub">Supports MP4, AVI, MOV, MKV — up to 500 MB</div>
+        </div>
+        <input type="file" id="video-file-input" accept="video/*" onchange="handleFileSelect(event)" />
+
+        <!-- Progress -->
+        <div class="upload-progress" id="upload-progress">
+          <div class="progress-label" id="progress-label">Uploading...</div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="progress-fill"></div>
+          </div>
+        </div>
+
+        <!-- Alert -->
+        <div class="alert" id="upload-alert"></div>
+
+        <!-- Video Feed -->
+        <div class="video-wrapper" id="video-wrapper" style="display:none;">
+          <div class="video-placeholder" id="video-placeholder">
+            <div class="placeholder-icon">🎞</div>
+            <div class="placeholder-text">Processing video...</div>
+          </div>
+          <img id="video-feed" src="" alt="Video Detection Feed" />
+        </div>
+
+        <div class="controls" id="video-controls" style="display:none;">
+          <button class="btn btn-primary" id="btn-play-video" onclick="playVideo()">
+            ▶ Play Detection
+          </button>
+          <button class="btn btn-danger" id="btn-stop-video" onclick="stopVideo()" disabled>
+            ⏹ Stop
+          </button>
+          <button class="btn btn-secondary" onclick="resetUpload()">
+            🔄 Upload Another
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ---- Tab switching ----
+    function switchTab(mode) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.getElementById('tab-' + mode).classList.add('active');
+      document.getElementById('panel-' + mode).classList.add('active');
+      // Stop webcam if switching away
+      if (mode !== 'live') stopWebcam();
+    }
+
+    // ===================== WEBCAM =====================
+    let webcamRunning = false;
+
+    function startWebcam() {
+      const feed = document.getElementById('webcam-feed');
+      const placeholder = document.getElementById('webcam-placeholder');
+      const dot = document.getElementById('webcam-dot');
+
+      document.getElementById('btn-start-cam').disabled = true;
+      document.getElementById('btn-stop-cam').disabled = false;
+
+      // Signal server and start feed
+      fetch('/webcam/start', { method: 'POST' })
+        .then(() => {
+          feed.src = '/stream/webcam?' + Date.now();
+          feed.style.display = 'block';
+          placeholder.style.display = 'none';
+          dot.classList.add('live');
+          webcamRunning = true;
+        })
+        .catch(err => {
+          alert('Could not start webcam: ' + err);
+          document.getElementById('btn-start-cam').disabled = false;
+          document.getElementById('btn-stop-cam').disabled = true;
+        });
+    }
+
+    function stopWebcam() {
+      const feed = document.getElementById('webcam-feed');
+      const placeholder = document.getElementById('webcam-placeholder');
+      const dot = document.getElementById('webcam-dot');
+
+      fetch('/webcam/stop', { method: 'POST' }).catch(() => {});
+      feed.src = '';
+      feed.style.display = 'none';
+      placeholder.style.display = 'flex';
+      dot.classList.remove('live');
+      webcamRunning = false;
+      document.getElementById('btn-start-cam').disabled = false;
+      document.getElementById('btn-stop-cam').disabled = true;
+    }
+
+    // ===================== VIDEO UPLOAD =====================
+    let uploadedFilename = null;
+    let videoStreaming = false;
+
+    function handleDragOver(e) {
+      e.preventDefault();
+      document.getElementById('upload-zone').classList.add('drag-over');
+    }
+    function handleDragLeave(e) {
+      document.getElementById('upload-zone').classList.remove('drag-over');
+    }
+    function handleDrop(e) {
+      e.preventDefault();
+      document.getElementById('upload-zone').classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) uploadFile(file);
+    }
+    function handleFileSelect(e) {
+      const file = e.target.files[0];
+      if (file) uploadFile(file);
+    }
+
+    function showAlert(type, msg) {
+      const el = document.getElementById('upload-alert');
+      el.className = 'alert show alert-' + type;
+      el.innerHTML = (type === 'success' ? '✅ ' : '❌ ') + msg;
+    }
+
+    function uploadFile(file) {
+      const formData = new FormData();
+      formData.append('video', file);
+
+      // Show progress
+      const progress = document.getElementById('upload-progress');
+      const fill = document.getElementById('progress-fill');
+      const label = document.getElementById('progress-label');
+      progress.style.display = 'block';
+      fill.style.width = '0%';
+      label.textContent = 'Uploading ' + file.name + '...';
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/upload/video');
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          fill.style.width = pct + '%';
+          label.textContent = `Uploading... ${pct}%`;
+        }
+      };
+
+      xhr.onload = () => {
+        progress.style.display = 'none';
+        const resp = JSON.parse(xhr.responseText);
+        if (xhr.status === 200 && resp.status === 'uploaded') {
+          uploadedFilename = resp.filename;
+          showAlert('success', 'Video uploaded: ' + resp.filename + '. Ready to detect!');
+          document.getElementById('video-wrapper').style.display = 'flex';
+          document.getElementById('video-controls').style.display = 'flex';
+          document.getElementById('upload-zone').style.display = 'none';
+        } else {
+          showAlert('error', resp.error || 'Upload failed.');
+        }
+      };
+
+      xhr.onerror = () => {
+        progress.style.display = 'none';
+        showAlert('error', 'Network error during upload.');
+      };
+
+      xhr.send(formData);
+    }
+
+    function playVideo() {
+      if (!uploadedFilename) return;
+      const feed = document.getElementById('video-feed');
+      const placeholder = document.getElementById('video-placeholder');
+      const dot = document.getElementById('video-dot');
+
+      feed.src = '/stream/video?' + Date.now();
+      feed.style.display = 'block';
+      placeholder.style.display = 'none';
+      dot.classList.add('live');
+      videoStreaming = true;
+
+      document.getElementById('btn-play-video').disabled = true;
+      document.getElementById('btn-stop-video').disabled = false;
+
+      feed.onerror = () => {
+        showAlert('error', 'Stream ended or error occurred.');
+        stopVideo();
+      };
+    }
+
+    function stopVideo() {
+      const feed = document.getElementById('video-feed');
+      const placeholder = document.getElementById('video-placeholder');
+      const dot = document.getElementById('video-dot');
+
+      feed.src = '';
+      feed.style.display = 'none';
+      placeholder.style.display = 'flex';
+      dot.classList.remove('live');
+      videoStreaming = false;
+
+      document.getElementById('btn-play-video').disabled = false;
+      document.getElementById('btn-stop-video').disabled = true;
+    }
+
+    function resetUpload() {
+      stopVideo();
+      uploadedFilename = null;
+      document.getElementById('upload-zone').style.display = 'block';
+      document.getElementById('video-wrapper').style.display = 'none';
+      document.getElementById('video-controls').style.display = 'none';
+      const alert = document.getElementById('upload-alert');
+      alert.className = 'alert';
+      document.getElementById('video-file-input').value = '';
+    }
+  </script>
+</body>
+</html>
