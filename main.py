@@ -1,4 +1,4 @@
-#!/home/reddy895/Downloads/PotHole/.venv/bin/python
+#!/usr/bin/env python3
 """Terminal-Based AI Pothole Detection System.
 
 Main application entry point supporting Webcam, Image, and Video detection modes.
@@ -22,6 +22,7 @@ from utils.video_utils import (
     print_detection_status,
     save_annotated_image,
     create_video_writer,
+    save_detection_log,
 )
 
 
@@ -66,6 +67,21 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Run without displaying OpenCV window (useful for headless / automated runs)",
     )
+    parser.add_argument(
+        "--save-log",
+        action="store_true",
+        help="Append a JSONL detection event log to outputs/detection_log.jsonl",
+    )
+    parser.add_argument(
+        "--skip-frames",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Run inference every Nth frame; reuse last result for skipped frames. "
+            "0 = no skipping (default). Example: --skip-frames 2 halves CPU load."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -73,31 +89,32 @@ def parse_arguments() -> argparse.Namespace:
 # Mode Handlers
 # =========================================================================
 
-def run_image_mode(detector: PotholeDetector, image_path_str: str, no_view: bool = False) -> None:
+def run_image_mode(
+    detector: PotholeDetector,
+    image_path_str: str,
+    no_view: bool = False,
+    save_log: bool = False,
+) -> None:
     """Detect potholes in a single image, print stats, and save output."""
     image_path = Path(image_path_str)
     if not image_path.is_file():
         print(f"\n[ERROR] Input image file not found: {image_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Print system status banner
     print_banner(
         source_name=f"Image ({image_path.name})",
         model_path=str(detector.model_path),
         device_name=detector.device_name,
     )
 
-    # Load image
     frame = cv2.imread(str(image_path))
     if frame is None:
         print(f"[ERROR] Could not decode image: {image_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Perform detection
     result = detector.detect(frame)
     annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
 
-    # Print terminal telemetry
     print_detection_status(
         count=result.count,
         highest_confidence=result.max_confidence,
@@ -105,11 +122,13 @@ def run_image_mode(detector: PotholeDetector, image_path_str: str, no_view: bool
         throttle_interval=0.0,
     )
 
-    # Save processed image to outputs/
     saved_path = save_annotated_image(annotated_frame, image_path.name)
     print(f"\n[SAVED] Processed image saved to: {saved_path}")
 
-    # Display window
+    if save_log:
+        save_detection_log(result, source_name=image_path.name, frame_idx=1)
+        print(f"[LOG]   Detection event written to: {config.OUTPUTS_DIR / 'detection_log.jsonl'}")
+
     if not no_view:
         window_title = f"{config.WINDOW_TITLE} - {image_path.name}"
         cv2.imshow(window_title, annotated_frame)
@@ -118,8 +137,23 @@ def run_image_mode(detector: PotholeDetector, image_path_str: str, no_view: bool
         cv2.destroyAllWindows()
 
 
-def run_video_mode(detector: PotholeDetector, video_path_str: str, no_view: bool = False) -> None:
-    """Process road video frame-by-frame, display detection, and save annotated video."""
+def run_video_mode(
+    detector: PotholeDetector,
+    video_path_str: str,
+    no_view: bool = False,
+    save_log: bool = False,
+    skip_frames: int = 0,
+) -> None:
+    """Process road video frame-by-frame, display detection, and save annotated video.
+
+    Args:
+        detector: Initialised PotholeDetector.
+        video_path_str: Path to the input video file.
+        no_view: Suppress the OpenCV preview window.
+        save_log: Append detection events to outputs/detection_log.jsonl.
+        skip_frames: Run inference every Nth frame; reuse last result otherwise.
+            0 means every frame (no skipping).
+    """
     video_path = Path(video_path_str)
     if not video_path.is_file():
         print(f"\n[ERROR] Input video file not found: {video_path}", file=sys.stderr)
@@ -135,22 +169,22 @@ def run_video_mode(detector: PotholeDetector, video_path_str: str, no_view: bool
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Setup video writer to outputs/
     out_filename = f"annotated_{video_path.name}"
     writer, out_path = create_video_writer(out_filename, video_fps, (width, height))
 
-    # Print system status banner
     print_banner(
         source_name=f"Video ({video_path.name})",
         model_path=str(detector.model_path),
         device_name=detector.device_name,
     )
-    print(f"Video resolution: {width}x{height} | Total frames: {total_frames} | Target FPS: {video_fps:.1f}")
-    print(f"Output destination: {out_path}\n")
+    skip_info = f" | Frame-skip: {skip_frames}" if skip_frames > 0 else ""
+    print(f"Resolution: {width}x{height} | Frames: {total_frames} | FPS: {video_fps:.1f}{skip_info}")
+    print(f"Output: {out_path}\n")
 
     frame_idx = 0
     last_print_time = 0.0
     total_potholes_found = 0
+    last_result = None  # cached result for skipped frames
 
     try:
         while True:
@@ -160,15 +194,20 @@ def run_video_mode(detector: PotholeDetector, video_path_str: str, no_view: bool
 
             frame_idx += 1
 
-            # Detect potholes
-            result = detector.detect(frame)
-            annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
+            # Frame-skip optimisation: run inference every (skip_frames+1) frames
+            if skip_frames > 0 and frame_idx % (skip_frames + 1) != 1 and last_result is not None:
+                result = last_result
+            else:
+                result = detector.detect(frame)
+                last_result = result
 
-            # Write frame to output video
+            annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
             writer.write(annotated_frame)
             total_potholes_found += result.count
 
-            # Print terminal telemetry
+            if save_log and result.count > 0:
+                save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
+
             last_print_time = print_detection_status(
                 count=result.count,
                 highest_confidence=result.max_confidence,
@@ -177,7 +216,6 @@ def run_video_mode(detector: PotholeDetector, video_path_str: str, no_view: bool
                 last_print_time=last_print_time,
             )
 
-            # Display window
             if not no_view:
                 cv2.imshow(config.WINDOW_TITLE, annotated_frame)
                 key = cv2.waitKey(1) & 0xFF
@@ -195,10 +233,26 @@ def run_video_mode(detector: PotholeDetector, video_path_str: str, no_view: bool
     print(f"Processed frames: {frame_idx}/{total_frames}")
     print(f"Total pothole instances detected: {total_potholes_found}")
     print(f"Annotated video saved to: {out_path}")
+    if save_log:
+        print(f"Detection log written to: {config.OUTPUTS_DIR / 'detection_log.jsonl'}")
 
 
-def run_webcam_mode(detector: PotholeDetector, cam_idx: int = 0, no_view: bool = False) -> None:
-    """Capture live webcam frames, run real-time detection, and display OpenCV window."""
+def run_webcam_mode(
+    detector: PotholeDetector,
+    cam_idx: int = 0,
+    no_view: bool = False,
+    save_log: bool = False,
+    skip_frames: int = 0,
+) -> None:
+    """Capture live webcam frames, run real-time detection, and display OpenCV window.
+
+    Args:
+        detector: Initialised PotholeDetector.
+        cam_idx: Camera device index.
+        no_view: Suppress OpenCV preview window (headless mode).
+        save_log: Append detection events to outputs/detection_log.jsonl.
+        skip_frames: Run inference every Nth frame; reuse last result otherwise.
+    """
     print_banner(
         source_name=f"Webcam (Device {cam_idx})",
         model_path=str(detector.model_path),
@@ -208,7 +262,6 @@ def run_webcam_mode(detector: PotholeDetector, cam_idx: int = 0, no_view: bool =
 
     cap = cv2.VideoCapture(cam_idx)
     if not cap.isOpened():
-        # Fallback test with CAP_ANY
         cap = cv2.VideoCapture(cam_idx, cv2.CAP_ANY)
 
     if not cap.isOpened():
@@ -218,7 +271,9 @@ def run_webcam_mode(detector: PotholeDetector, cam_idx: int = 0, no_view: bool =
 
     print("Camera active. Press 'Q' inside the preview window to exit.\n")
 
+    frame_idx = 0
     last_print_time = 0.0
+    last_result = None
 
     try:
         while True:
@@ -228,11 +283,20 @@ def run_webcam_mode(detector: PotholeDetector, cam_idx: int = 0, no_view: bool =
                 time.sleep(0.05)
                 continue
 
-            # Run detection
-            result = detector.detect(frame)
+            frame_idx += 1
+
+            # Frame-skip: reuse last result for skipped frames
+            if skip_frames > 0 and frame_idx % (skip_frames + 1) != 1 and last_result is not None:
+                result = last_result
+            else:
+                result = detector.detect(frame)
+                last_result = result
+
             annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
 
-            # Print terminal telemetry
+            if save_log and result.count > 0:
+                save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
+
             last_print_time = print_detection_status(
                 count=result.count,
                 highest_confidence=result.max_confidence,
@@ -241,7 +305,6 @@ def run_webcam_mode(detector: PotholeDetector, cam_idx: int = 0, no_view: bool =
                 last_print_time=last_print_time,
             )
 
-            # Display preview window
             if not no_view:
                 cv2.imshow(config.WINDOW_TITLE, annotated_frame)
                 key = cv2.waitKey(1) & 0xFF
@@ -361,11 +424,28 @@ def main():
 
     # Dispatch to appropriate mode
     if args.source == "image":
-        run_image_mode(detector=detector, image_path_str=args.input, no_view=args.no_view)
+        run_image_mode(
+            detector=detector,
+            image_path_str=args.input,
+            no_view=args.no_view,
+            save_log=args.save_log,
+        )
     elif args.source == "video":
-        run_video_mode(detector=detector, video_path_str=args.input, no_view=args.no_view)
+        run_video_mode(
+            detector=detector,
+            video_path_str=args.input,
+            no_view=args.no_view,
+            save_log=args.save_log,
+            skip_frames=args.skip_frames,
+        )
     elif args.source == "webcam":
-        run_webcam_mode(detector=detector, cam_idx=args.cam_idx, no_view=args.no_view)
+        run_webcam_mode(
+            detector=detector,
+            cam_idx=args.cam_idx,
+            no_view=args.no_view,
+            save_log=args.save_log,
+            skip_frames=args.skip_frames,
+        )
 
 
 if __name__ == "__main__":
