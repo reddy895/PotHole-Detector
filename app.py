@@ -3,6 +3,10 @@
 Provides two modes:
   1. Live Video  - Real-time detection via webcam stream (MJPEG)
   2. Video Feed  - Upload a video file and stream annotated output
+
+REST API endpoints:
+  GET  /api/system  — hardware & model info
+  POST /api/conf    — live confidence threshold update
 """
 import sys
 import os
@@ -27,6 +31,7 @@ import numpy as np
 
 from config import config
 from detector import PotholeDetector
+from utils.helpers import get_device_info
 
 # ---------------------------------------------------------------------------
 # App Setup
@@ -210,6 +215,81 @@ def stream_video():
 @app.route("/outputs/<path:filename>")
 def serve_output(filename):
     return send_from_directory(str(config.OUTPUTS_DIR), filename)
+
+
+# ---------------------------------------------------------------------------
+# REST API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/system", methods=["GET"])
+def api_system():
+    """Return hardware and model information as JSON.
+
+    Response schema::
+
+        {
+          "model_path": "models/pothole.pt",
+          "model_exists": true,
+          "device": "cuda:0",
+          "is_cuda": true,
+          "device_name": "NVIDIA GeForce RTX 2050",
+          "cuda_available": true,
+          "vram_mb": 4096,
+          "confidence_threshold": 0.35,
+          "iou_threshold": 0.45,
+          "image_size": 640
+        }
+    """
+    hw = get_device_info(config.FORCE_DEVICE)
+    detector = get_detector() if _detector is not None else None
+    conf = detector.confidence_threshold if detector else config.CONFIDENCE_THRESHOLD
+
+    return jsonify({
+        "model_path": str(config.MODEL_PATH),
+        "model_exists": config.MODEL_PATH.is_file(),
+        "device": hw["device"],
+        "is_cuda": hw["is_cuda"],
+        "device_name": hw["device_name"],
+        "cuda_available": hw["cuda_available"],
+        "vram_mb": hw["vram_mb"],
+        "confidence_threshold": conf,
+        "iou_threshold": config.IOU_THRESHOLD,
+        "image_size": config.IMAGE_SIZE,
+    })
+
+
+@app.route("/api/conf", methods=["POST"])
+def api_set_confidence():
+    """Update the running detector's confidence threshold without restart.
+
+    Request body (JSON)::
+
+        {"threshold": 0.45}
+
+    Response::
+
+        {"status": "ok", "confidence_threshold": 0.45}
+
+    Allows live tuning from the dashboard or external tooling — useful when
+    switching between road surfaces with different detection difficulty.
+    """
+    data = request.get_json(silent=True) or {}
+    threshold = data.get("threshold")
+
+    if threshold is None:
+        return jsonify({"error": "Missing 'threshold' field in JSON body"}), 400
+
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        return jsonify({"error": "'threshold' must be a float"}), 400
+
+    if not (0.0 < threshold < 1.0):
+        return jsonify({"error": "'threshold' must be between 0.0 and 1.0 (exclusive)"}), 400
+
+    detector = get_detector()
+    detector.confidence_threshold = threshold
+    return jsonify({"status": "ok", "confidence_threshold": threshold})
 
 
 # ---------------------------------------------------------------------------
