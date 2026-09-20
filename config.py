@@ -18,15 +18,15 @@ class Config:
     # Detection thresholds
     CONFIDENCE_THRESHOLD: float = float(os.getenv("POTHOLE_CONFIDENCE_THRESHOLD", "0.35"))
     IOU_THRESHOLD: float = float(os.getenv("POTHOLE_IOU_THRESHOLD", "0.45"))
-    # Image size used for YOLO inference.
-    # On CPU, 320 is ~3-4x faster than 640 with acceptable accuracy for potholes.
-    # Override via env var: POTHOLE_IMG_SIZE=640 python main.py
+    # Image size used for YOLO inference. Override via: POTHOLE_IMG_SIZE=640
     IMAGE_SIZE: int = int(os.getenv("POTHOLE_IMG_SIZE", "0"))  # 0 = auto-select by device
-    CPU_IMAGE_SIZE: int = int(os.getenv("POTHOLE_CPU_IMG_SIZE", "320"))
+    CPU_IMAGE_SIZE: int = int(os.getenv("POTHOLE_CPU_IMG_SIZE", "416"))
     GPU_IMAGE_SIZE: int = int(os.getenv("POTHOLE_GPU_IMG_SIZE", "640"))
 
-    # Target processing FPS for video mode (used by interactive menu auto-skip).
-    TARGET_VIDEO_FPS: int = int(os.getenv("POTHOLE_TARGET_FPS", "20"))
+
+    # Target processing & playback FPS for video mode (e.g. 12-13 FPS for comfortable human preview).
+    TARGET_VIDEO_FPS: float = float(os.getenv("POTHOLE_TARGET_FPS", "12.5"))
+
 
     # Hardware device selection (GPU if CUDA is available, otherwise fallback to CPU)
     FORCE_DEVICE: str = os.getenv("POTHOLE_DEVICE", "auto")
@@ -90,7 +90,7 @@ class Config:
     DEPTH_NEAR_SCALE: float = float(os.getenv("POTHOLE_DEPTH_NEAR_SCALE", "1.0"))
 
     # Video & Stream defaults
-    DEFAULT_FPS: int = 30
+    DEFAULT_FPS: int = int(os.getenv("POTHOLE_DEFAULT_FPS", "13"))
     DEFAULT_CAMERA_INDEX: int = 0
     WINDOW_TITLE: str = "AI Pothole Detection System (Press Q to quit)"
 

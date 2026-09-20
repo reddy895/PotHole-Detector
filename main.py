@@ -123,20 +123,23 @@ def run_image_mode(
 
     result = detector.detect(frame)
     annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
-
-    print_detection_status(
-        count=result.count,
-        highest_confidence=result.max_confidence,
-        fps=result.fps,
-        throttle_interval=0.0,
-    )
-
     saved_path = save_annotated_image(annotated_frame, image_path.name)
-    print(f"\n[SAVED] Processed image saved to: {saved_path}")
 
     if save_log:
         save_detection_log(result, source_name=image_path.name, frame_idx=1)
-        print(f"[LOG]   Detection event written to: {config.OUTPUTS_DIR / 'detection_log.jsonl'}")
+
+    log_file = (config.OUTPUTS_DIR / "detection_log.jsonl") if save_log else None
+    print_final_summary(
+        source_name=image_path.name,
+        processed_frames=1,
+        total_frames=1,
+        unique_potholes=result.count,
+        total_instances=result.count,
+        highest_confidence=result.max_confidence,
+        avg_fps=result.fps,
+        output_path=saved_path,
+        log_path=log_file,
+    )
 
     if not no_view:
         window_title = f"{config.WINDOW_TITLE} - {image_path.name}"
@@ -174,12 +177,14 @@ def run_video_mode(
         sys.exit(1)
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_fps = cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS
+    target_fps = float(config.TARGET_VIDEO_FPS)
+    target_frame_time = 1.0 / target_fps if target_fps > 0 else 0.080
+    output_fps = target_fps if target_fps > 0 else (cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS)
+
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
     out_filename = f"annotated_{video_path.name}"
-    writer, out_path = create_video_writer(out_filename, video_fps, (width, height))
+    writer, out_path = create_video_writer(out_filename, output_fps, (width, height))
 
     print_banner(
         source_name=f"Video ({video_path.name})",
@@ -187,16 +192,19 @@ def run_video_mode(
         device_name=detector.device_name,
     )
     skip_info = f" | Frame-skip: {skip_frames}" if skip_frames > 0 else ""
-    print(f"Resolution: {width}x{height} | Frames: {total_frames} | FPS: {video_fps:.1f}{skip_info}")
+    print(f"Resolution: {width}x{height} | Frames: {total_frames} | Target FPS: {target_fps:.1f}{skip_info}")
     print(f"Output: {out_path}\n")
 
     frame_idx = 0
-    last_print_time = 0.0
     total_potholes_found = 0
+    fps_history = []
+    tracker = PotholeTracker(min_hits=min(3, max(1, total_frames // 15)))
+    last_result = None
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
             while True:
+                loop_start = time.perf_counter()
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     break
@@ -213,39 +221,67 @@ def run_video_mode(
                     # No result yet (very first frame) — run synchronously as fallback
                     result = detector.detect(frame)
 
-                annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
-                writer.write(annotated_frame)
+                if result is not last_result:
+                    tracker.update(result.detections, width, height)
+                    last_result = result
+
                 total_potholes_found += result.count
+
+                work_duration = time.perf_counter() - loop_start
+                remaining_time = target_frame_time - work_duration
+                current_fps = min(target_fps, 1.0 / target_frame_time) if remaining_time > 0 else 1.0 / work_duration
+                fps_history.append(current_fps)
+
+                annotated_frame = detector.draw_annotations(
+                    frame,
+                    result,
+                    show_hud=True,
+                    total_count=tracker.unique_count,
+                    override_fps=current_fps,
+                )
+                writer.write(annotated_frame)
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
 
-                last_print_time = print_detection_status(
-                    count=result.count,
-                    highest_confidence=result.max_confidence,
-                    fps=result.fps,
-                    throttle_interval=0.4,
-                    last_print_time=last_print_time,
+                print_progress_bar(
+                    frame_idx=frame_idx,
+                    total_frames=total_frames,
+                    fps=current_fps,
+                    current_potholes=tracker.unique_count,
+                    highest_confidence=tracker.highest_confidence,
                 )
 
                 if not no_view:
                     cv2.imshow(config.WINDOW_TITLE, annotated_frame)
-                    key = cv2.waitKey(1) & 0xFF
+                    wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
+                    key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
                         print("\n[INFO] Stopped by user (Q pressed).")
                         break
+                else:
+                    if remaining_time > 0:
+                        time.sleep(remaining_time)
+
     finally:
         cap.release()
         writer.release()
         if not no_view:
             cv2.destroyAllWindows()
 
-    print(f"\n[COMPLETE] Video processing finished.")
-    print(f"Processed frames: {frame_idx}/{total_frames}")
-    print(f"Total pothole instances detected: {total_potholes_found}")
-    print(f"Annotated video saved to: {out_path}")
-    if save_log:
-        print(f"Detection log written to: {config.OUTPUTS_DIR / 'detection_log.jsonl'}")
+    avg_fps = sum(fps_history) / len(fps_history) if fps_history else 0.0
+    log_file = (config.OUTPUTS_DIR / "detection_log.jsonl") if save_log else None
+    print_final_summary(
+        source_name=video_path.name,
+        processed_frames=frame_idx,
+        total_frames=total_frames,
+        unique_potholes=tracker.unique_count,
+        total_instances=total_potholes_found,
+        highest_confidence=tracker.highest_confidence,
+        avg_fps=avg_fps,
+        output_path=out_path,
+        log_path=log_file,
+    )
 
 
 def run_webcam_mode(
@@ -282,12 +318,19 @@ def run_webcam_mode(
 
     print("Camera active. Press 'Q' inside the preview window to exit.\n")
 
+    target_fps = float(config.TARGET_VIDEO_FPS)
+    target_frame_time = 1.0 / target_fps if target_fps > 0 else 0.080
+
     frame_idx = 0
-    last_print_time = 0.0
+    total_potholes_found = 0
+    fps_history = []
+    tracker = PotholeTracker(min_hits=3)
+    last_result = None
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
             while True:
+                loop_start = time.perf_counter()
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     print("[WARN] Failed to read frame from webcam. Retrying...", file=sys.stderr)
@@ -295,6 +338,7 @@ def run_webcam_mode(
                     continue
 
                 frame_idx += 1
+                h, w = frame.shape[:2]
 
                 # Feed every Nth frame to inference thread; reuse last result otherwise
                 if skip_frames == 0 or frame_idx % (skip_frames + 1) == 1:
@@ -304,31 +348,65 @@ def run_webcam_mode(
                 if result is None:
                     result = detector.detect(frame)  # fallback for very first frame
 
-                annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
+                if result is not last_result:
+                    tracker.update(result.detections, w, h)
+                    last_result = result
+
+                total_potholes_found += result.count
+
+                work_duration = time.perf_counter() - loop_start
+                remaining_time = target_frame_time - work_duration
+                current_fps = min(target_fps, 1.0 / target_frame_time) if remaining_time > 0 else 1.0 / work_duration
+                fps_history.append(current_fps)
+
+                annotated_frame = detector.draw_annotations(
+                    frame,
+                    result,
+                    show_hud=True,
+                    total_count=tracker.unique_count,
+                    override_fps=current_fps,
+                )
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
 
-                last_print_time = print_detection_status(
-                    count=result.count,
-                    highest_confidence=result.max_confidence,
-                    fps=result.fps,
-                    throttle_interval=0.4,
-                    last_print_time=last_print_time,
+                print_webcam_status(
+                    frame_idx=frame_idx,
+                    fps=current_fps,
+                    current_count=result.count,
+                    total_unique=tracker.unique_count,
+                    highest_confidence=tracker.highest_confidence,
                 )
 
                 if not no_view:
                     cv2.imshow(config.WINDOW_TITLE, annotated_frame)
-                    key = cv2.waitKey(1) & 0xFF
+                    wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
+                    key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
                         print("\n[INFO] Stopped by user (Q pressed).")
                         break
+                else:
+                    if remaining_time > 0:
+                        time.sleep(remaining_time)
+
     finally:
         cap.release()
         if not no_view:
             cv2.destroyAllWindows()
 
-    print("[INFO] Camera released and detection session closed.")
+    avg_fps = sum(fps_history) / len(fps_history) if fps_history else 0.0
+    log_file = (config.OUTPUTS_DIR / "detection_log.jsonl") if save_log else None
+    print_final_summary(
+        source_name=f"Webcam ({cam_idx})",
+        processed_frames=frame_idx,
+        total_frames=frame_idx,
+        unique_potholes=tracker.unique_count,
+        total_instances=total_potholes_found,
+        highest_confidence=tracker.highest_confidence,
+        avg_fps=avg_fps,
+        log_path=log_file,
+    )
+
 
 
 # =========================================================================

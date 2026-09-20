@@ -173,9 +173,14 @@ def print_final_summary(
     print(f"  Highest Confidence:        {conf_str}")
     print(f"  Average FPS:               {avg_fps:.1f}")
     if output_path:
-        print(f"  Annotated Video Saved To:  {output_path}")
+        suffix = output_path.suffix.lower()
+        media_type = "Image" if suffix in (".jpg", ".jpeg", ".png", ".bmp", ".webp") else "Video"
+        lbl = f"Annotated {media_type} Saved:"
+        print(f"  {lbl:<27}{output_path}")
+
     if log_path:
         print(f"  Detection Log:             {log_path}")
+
     print("=" * 60)
     print()
 

@@ -293,6 +293,7 @@ class PotholeDetector:
         result: DetectionResult,
         show_hud: bool = True,
         total_count: Optional[int] = None,
+        override_fps: Optional[float] = None,
     ) -> np.ndarray:
         """Draw bounding boxes, severity labels, corner accents, and HUD overlay.
 
@@ -301,6 +302,7 @@ class PotholeDetector:
             result: DetectionResult from :meth:`detect`.
             show_hud: Render the count/FPS status bar in the top corners.
             total_count: Cumulative unique potholes detected across video stream.
+            override_fps: Optional custom FPS to display on HUD.
 
         Returns:
             Annotated copy of the input frame (does not modify in-place).
@@ -390,8 +392,9 @@ class PotholeDetector:
                 font, 0.6, (255, 255, 255), 2, cv2.LINE_AA,
             )
 
-            # FPS card (top-right) — shows smoothed EMA value
-            fps_text = f"FPS: {result.fps:.1f}"
+            # FPS card (top-right) — shows smoothed EMA value or pacing FPS
+            display_fps = override_fps if override_fps is not None else result.fps
+            fps_text = f"FPS: {display_fps:.1f}"
             (fw, _), _ = cv2.getTextSize(fps_text, font, 0.6, 2)
             card2_w = fw + 32
             x2_card = width - margin - card2_w
