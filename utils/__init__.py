@@ -8,6 +8,7 @@ from .video_utils import (
     save_annotated_image,
     create_video_writer,
 )
+from .whatsapp_notifier import WhatsAppNotifier
 
 __all__ = [
     "print_banner",
@@ -17,5 +18,7 @@ __all__ = [
     "print_final_summary",
     "save_annotated_image",
     "create_video_writer",
+    "WhatsAppNotifier",
 ]
+
 
