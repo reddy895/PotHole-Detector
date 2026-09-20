@@ -5,8 +5,10 @@ Main application entry point supporting Webcam, Image, and Video detection modes
 """
 import argparse
 import sys
+from typing import Optional
 from pathlib import Path
 import time
+
 import cv2
 import numpy as np
 
@@ -32,6 +34,8 @@ from utils.video_utils import (
     create_video_writer,
     save_detection_log,
 )
+from utils.whatsapp_notifier import WhatsAppNotifier
+
 
 
 
@@ -91,7 +95,20 @@ def parse_arguments() -> argparse.Namespace:
             "0 = no skipping (default). Example: --skip-frames 2 halves CPU load."
         ),
     )
+    parser.add_argument(
+        "--whatsapp",
+        action="store_true",
+        help="Enable automated WhatsApp hazard alerts to authorities",
+    )
+    parser.add_argument(
+        "--authority-phone",
+        type=str,
+        default=None,
+        metavar="PHONE",
+        help="Authority WhatsApp phone number with country code (e.g. +919876543210)",
+    )
     return parser.parse_args()
+
 
 
 # =========================================================================
@@ -103,7 +120,9 @@ def run_image_mode(
     image_path_str: str,
     no_view: bool = False,
     save_log: bool = False,
+    notifier: Optional[WhatsAppNotifier] = None,
 ) -> None:
+
     """Detect potholes in a single image, print stats, and save output."""
     image_path = Path(image_path_str)
     if not image_path.is_file():
@@ -128,7 +147,18 @@ def run_image_mode(
     if save_log:
         save_detection_log(result, source_name=image_path.name, frame_idx=1)
 
+    # Dispatch WhatsApp alert to authority if configured
+    if notifier and notifier.is_configured and result.count > 0:
+        for det in result.detections:
+            notifier.send_pothole_alert(
+                detection=det,
+                frame=annotated_frame,
+                source_name=image_path.name,
+            )
+            break
+
     log_file = (config.OUTPUTS_DIR / "detection_log.jsonl") if save_log else None
+
     print_final_summary(
         source_name=image_path.name,
         processed_frames=1,
@@ -155,7 +185,9 @@ def run_video_mode(
     no_view: bool = False,
     save_log: bool = False,
     skip_frames: int = 0,
+    notifier: Optional[WhatsAppNotifier] = None,
 ) -> None:
+
     """Process road video frame-by-frame, display detection, and save annotated video.
 
     Args:
@@ -244,6 +276,17 @@ def run_video_mode(
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
 
+                # Dispatch automated WhatsApp alert for significant potholes
+                if notifier and notifier.is_configured and result.count > 0:
+                    for det in result.detections:
+                        if det.severity in ("Medium", "High"):
+                            notifier.send_pothole_alert(
+                                detection=det,
+                                frame=annotated_frame,
+                                source_name=video_path.name,
+                            )
+                            break
+
                 print_progress_bar(
                     frame_idx=frame_idx,
                     total_frames=total_frames,
@@ -290,7 +333,9 @@ def run_webcam_mode(
     no_view: bool = False,
     save_log: bool = False,
     skip_frames: int = 0,
+    notifier: Optional[WhatsAppNotifier] = None,
 ) -> None:
+
     """Capture live webcam frames, run real-time detection, and display OpenCV window.
 
     Args:
@@ -369,6 +414,17 @@ def run_webcam_mode(
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
+
+                # Dispatch automated WhatsApp alert for significant potholes
+                if notifier and notifier.is_configured and result.count > 0:
+                    for det in result.detections:
+                        if det.severity in ("Medium", "High"):
+                            notifier.send_pothole_alert(
+                                detection=det,
+                                frame=annotated_frame,
+                                source_name=f"webcam:{cam_idx}",
+                            )
+                            break
 
                 print_webcam_status(
                     frame_idx=frame_idx,
@@ -457,10 +513,18 @@ def interactive_menu() -> argparse.Namespace:
             break
         print("  Invalid choice. Enter 1 or 2.")
 
-    ns = argparse.Namespace(model=None, conf=config.CONFIDENCE_THRESHOLD,
-                            cam_idx=config.DEFAULT_CAMERA_INDEX, no_view=False,
-                            source=None, input=None, save_log=False,
-                            skip_frames=0)
+    ns = argparse.Namespace(
+        model=None,
+        conf=config.CONFIDENCE_THRESHOLD,
+        cam_idx=config.DEFAULT_CAMERA_INDEX,
+        no_view=False,
+        source=None,
+        input=None,
+        save_log=False,
+        skip_frames=0,
+        whatsapp=False,
+        authority_phone=None,
+    )
 
     if choice == "1":
         ns.source = "webcam"
@@ -481,6 +545,19 @@ def interactive_menu() -> argparse.Namespace:
                     ns.input = path_str
                     break
                 print(f"  [ERROR] File not found: {path_str}. Try again.")
+
+    print("\n  ----------------------------------------------")
+    print("  WhatsApp Automated Authority Alerts")
+    print("  ----------------------------------------------")
+    wa_choice = input("  Enable automated WhatsApp alerts to authorities? (y/N): ").strip().lower()
+    if wa_choice in ("y", "yes"):
+        ns.whatsapp = True
+        phone = input("  Enter authority's WhatsApp phone number (e.g. +919876543210): ").strip()
+        ns.authority_phone = phone if phone else None
+    else:
+        ns.whatsapp = False
+        ns.authority_phone = None
+
 
     print()
     return ns
@@ -513,12 +590,35 @@ def main():
         sys.exit(1)
 
     # Dispatch to appropriate mode
+    # Initialize WhatsApp Notifier if requested
+    notifier = None
+    if getattr(args, "whatsapp", False) or config.WHATSAPP_ENABLED:
+        authority = getattr(args, "authority_phone", None) or config.WHATSAPP_AUTHORITY_PHONE
+        notifier = WhatsAppNotifier(
+            authority_phone=authority,
+            enabled=True,
+            min_severity=config.WHATSAPP_MIN_SEVERITY,
+            cooldown_seconds=config.WHATSAPP_COOLDOWN_SECONDS,
+            port=config.WHATSAPP_PORT,
+        )
+        print("\n[WHATSAPP] Initializing automated hazard alert bot...")
+        started = notifier.start_service()
+        if started:
+            status = notifier.get_status()
+            if not status.get("ready"):
+                authenticated = notifier.wait_for_authentication(timeout_seconds=90)
+                if not authenticated:
+                    print("[WHATSAPP WARN] WhatsApp scan pending; proceeding with detection session.")
+        else:
+            print("[WHATSAPP WARN] Could not start WhatsApp bot microservice.")
+
     if args.source == "image":
         run_image_mode(
             detector=detector,
             image_path_str=args.input,
             no_view=args.no_view,
             save_log=args.save_log,
+            notifier=notifier,
         )
     elif args.source == "video":
         run_video_mode(
@@ -527,6 +627,7 @@ def main():
             no_view=args.no_view,
             save_log=args.save_log,
             skip_frames=args.skip_frames,
+            notifier=notifier,
         )
     elif args.source == "webcam":
         run_webcam_mode(
@@ -535,7 +636,9 @@ def main():
             no_view=args.no_view,
             save_log=args.save_log,
             skip_frames=args.skip_frames,
+            notifier=notifier,
         )
+
 
 
 if __name__ == "__main__":
