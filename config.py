@@ -18,7 +18,15 @@ class Config:
     # Detection thresholds
     CONFIDENCE_THRESHOLD: float = float(os.getenv("POTHOLE_CONFIDENCE_THRESHOLD", "0.35"))
     IOU_THRESHOLD: float = float(os.getenv("POTHOLE_IOU_THRESHOLD", "0.45"))
-    IMAGE_SIZE: int = int(os.getenv("POTHOLE_IMG_SIZE", "640"))
+    # Image size used for YOLO inference.
+    # On CPU, 320 is ~3-4x faster than 640 with acceptable accuracy for potholes.
+    # Override via env var: POTHOLE_IMG_SIZE=640 python main.py
+    IMAGE_SIZE: int = int(os.getenv("POTHOLE_IMG_SIZE", "0"))  # 0 = auto-select by device
+    CPU_IMAGE_SIZE: int = int(os.getenv("POTHOLE_CPU_IMG_SIZE", "320"))
+    GPU_IMAGE_SIZE: int = int(os.getenv("POTHOLE_GPU_IMG_SIZE", "640"))
+
+    # Target processing FPS for video mode (used by interactive menu auto-skip).
+    TARGET_VIDEO_FPS: int = int(os.getenv("POTHOLE_TARGET_FPS", "20"))
 
     # Hardware device selection (GPU if CUDA is available, otherwise fallback to CPU)
     FORCE_DEVICE: str = os.getenv("POTHOLE_DEVICE", "auto")
@@ -53,6 +61,17 @@ class Config:
                 return "CUDA GPU"
         return "CPU"
 
+    @classmethod
+    def get_image_size(cls) -> int:
+        """Return the effective YOLO inference image size.
+
+        If IMAGE_SIZE is explicitly set (non-zero), that value is used.
+        Otherwise auto-selects CPU_IMAGE_SIZE (320) on CPU or GPU_IMAGE_SIZE (640) on GPU.
+        """
+        if cls.IMAGE_SIZE != 0:
+            return cls.IMAGE_SIZE
+        return cls.GPU_IMAGE_SIZE if cls.get_device() == "cuda" else cls.CPU_IMAGE_SIZE
+
     # Visual bounding box styling (OpenCV BGR format)
     # Bright Tangerine / Safety Orange: (20, 120, 255) for high contrast against dark asphalt
     BOX_COLOR: tuple = (20, 120, 255)
@@ -60,6 +79,15 @@ class Config:
     LABEL_BG_COLOR: tuple = (20, 120, 255)
     LABEL_TEXT_COLOR: tuple = (255, 255, 255)
     CORNER_ACCENT_COLOR: tuple = (0, 240, 255)  # Bright cyan/yellow accent for corners
+
+    # Perspective/depth compensation for severity grading.
+    # Vertical Y-position in the frame is used as a depth proxy (dashcam footage):
+    #   Top of frame  → far away  → use DEPTH_FAR_SCALE  (objects look small but may be large)
+    #   Bottom of frame → close   → use DEPTH_NEAR_SCALE (objects look large due to perspective)
+    # The raw area_ratio is divided by lerp(FAR, NEAR, y_norm) before thresholding.
+    # Lower DEPTH_FAR_SCALE = more aggressive correction at the horizon.
+    DEPTH_FAR_SCALE: float = float(os.getenv("POTHOLE_DEPTH_FAR_SCALE", "0.25"))
+    DEPTH_NEAR_SCALE: float = float(os.getenv("POTHOLE_DEPTH_NEAR_SCALE", "1.0"))
 
     # Video & Stream defaults
     DEFAULT_FPS: int = 30

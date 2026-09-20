@@ -16,14 +16,23 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from config import config
-from detector import PotholeDetector, DetectionResult
+from detector import (
+    PotholeDetector,
+    DetectionResult,
+    ThreadedInferencePipeline,
+    PotholeTracker,
+)
 from utils.video_utils import (
     print_banner,
     print_detection_status,
+    print_progress_bar,
+    print_webcam_status,
+    print_final_summary,
     save_annotated_image,
     create_video_writer,
     save_detection_log,
 )
+
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -184,45 +193,47 @@ def run_video_mode(
     frame_idx = 0
     last_print_time = 0.0
     total_potholes_found = 0
-    last_result = None  # cached result for skipped frames
 
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                break
-
-            frame_idx += 1
-
-            # Frame-skip optimisation: run inference every (skip_frames+1) frames
-            if skip_frames > 0 and frame_idx % (skip_frames + 1) != 1 and last_result is not None:
-                result = last_result
-            else:
-                result = detector.detect(frame)
-                last_result = result
-
-            annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
-            writer.write(annotated_frame)
-            total_potholes_found += result.count
-
-            if save_log and result.count > 0:
-                save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
-
-            last_print_time = print_detection_status(
-                count=result.count,
-                highest_confidence=result.max_confidence,
-                fps=result.fps,
-                throttle_interval=0.4,
-                last_print_time=last_print_time,
-            )
-
-            if not no_view:
-                cv2.imshow(config.WINDOW_TITLE, annotated_frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), ord("Q"), 27):
-                    print("\n[INFO] Stopped by user (Q pressed).")
+        with ThreadedInferencePipeline(detector) as pipe:
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
                     break
 
+                frame_idx += 1
+
+                # Frame-skip: feed only every Nth frame to the inference thread;
+                # the pipeline automatically returns the last result for skipped frames.
+                if skip_frames == 0 or frame_idx % (skip_frames + 1) == 1:
+                    pipe.put(frame)
+
+                result = pipe.get(timeout=0.05)
+                if result is None:
+                    # No result yet (very first frame) — run synchronously as fallback
+                    result = detector.detect(frame)
+
+                annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
+                writer.write(annotated_frame)
+                total_potholes_found += result.count
+
+                if save_log and result.count > 0:
+                    save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
+
+                last_print_time = print_detection_status(
+                    count=result.count,
+                    highest_confidence=result.max_confidence,
+                    fps=result.fps,
+                    throttle_interval=0.4,
+                    last_print_time=last_print_time,
+                )
+
+                if not no_view:
+                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (ord("q"), ord("Q"), 27):
+                        print("\n[INFO] Stopped by user (Q pressed).")
+                        break
     finally:
         cap.release()
         writer.release()
@@ -273,45 +284,45 @@ def run_webcam_mode(
 
     frame_idx = 0
     last_print_time = 0.0
-    last_result = None
 
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                print("[WARN] Failed to read frame from webcam. Retrying...", file=sys.stderr)
-                time.sleep(0.05)
-                continue
+        with ThreadedInferencePipeline(detector) as pipe:
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    print("[WARN] Failed to read frame from webcam. Retrying...", file=sys.stderr)
+                    time.sleep(0.05)
+                    continue
 
-            frame_idx += 1
+                frame_idx += 1
 
-            # Frame-skip: reuse last result for skipped frames
-            if skip_frames > 0 and frame_idx % (skip_frames + 1) != 1 and last_result is not None:
-                result = last_result
-            else:
-                result = detector.detect(frame)
-                last_result = result
+                # Feed every Nth frame to inference thread; reuse last result otherwise
+                if skip_frames == 0 or frame_idx % (skip_frames + 1) == 1:
+                    pipe.put(frame)
 
-            annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
+                result = pipe.get(timeout=0.04)
+                if result is None:
+                    result = detector.detect(frame)  # fallback for very first frame
 
-            if save_log and result.count > 0:
-                save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
+                annotated_frame = detector.draw_annotations(frame, result, show_hud=True)
 
-            last_print_time = print_detection_status(
-                count=result.count,
-                highest_confidence=result.max_confidence,
-                fps=result.fps,
-                throttle_interval=0.4,
-                last_print_time=last_print_time,
-            )
+                if save_log and result.count > 0:
+                    save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
 
-            if not no_view:
-                cv2.imshow(config.WINDOW_TITLE, annotated_frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), ord("Q"), 27):
-                    print("\n[INFO] Stopped by user (Q pressed).")
-                    break
+                last_print_time = print_detection_status(
+                    count=result.count,
+                    highest_confidence=result.max_confidence,
+                    fps=result.fps,
+                    throttle_interval=0.4,
+                    last_print_time=last_print_time,
+                )
 
+                if not no_view:
+                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (ord("q"), ord("Q"), 27):
+                        print("\n[INFO] Stopped by user (Q pressed).")
+                        break
     finally:
         cap.release()
         if not no_view:
@@ -370,7 +381,8 @@ def interactive_menu() -> argparse.Namespace:
 
     ns = argparse.Namespace(model=None, conf=config.CONFIDENCE_THRESHOLD,
                             cam_idx=config.DEFAULT_CAMERA_INDEX, no_view=False,
-                            source=None, input=None)
+                            source=None, input=None, save_log=False,
+                            skip_frames=0)
 
     if choice == "1":
         ns.source = "webcam"

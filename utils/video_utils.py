@@ -70,6 +70,117 @@ def print_detection_status(
     return now
 
 
+def print_progress_bar(
+    frame_idx: int,
+    total_frames: int,
+    fps: float,
+    current_potholes: int,
+    highest_confidence: float,
+    bar_length: int = 25,
+) -> None:
+    """Print an in-place dynamic progress update on a single line (no scrolling spam).
+
+    Args:
+        frame_idx: Current frame number (1-based).
+        total_frames: Total number of frames in the video.
+        fps: Current processing frames per second.
+        current_potholes: Count of unique potholes tracked so far.
+        highest_confidence: Highest confidence score (0.0 to 1.0) observed so far.
+        bar_length: Length of ASCII progress bar.
+    """
+    total = max(1, total_frames)
+    pct = min(100.0, (frame_idx / total) * 100)
+    filled = int(bar_length * frame_idx // total)
+    bar = "=" * filled + "-" * (bar_length - filled)
+    conf_str = f"{highest_confidence * 100:.1f}%" if highest_confidence > 0 else "0.0%"
+    line = (
+        f"\r[PROCESSING] [{bar}] {pct:5.1f}% | "
+        f"Frame {frame_idx}/{total_frames} | "
+        f"FPS: {fps:4.1f} | "
+        f"Potholes: {current_potholes} | "
+        f"Max Conf: {conf_str}"
+    )
+    sys.stdout.write(line)
+    sys.stdout.flush()
+
+
+def print_webcam_status(
+    frame_idx: int,
+    fps: float,
+    current_count: int,
+    total_unique: int,
+    highest_confidence: float,
+) -> None:
+    """Print an in-place dynamic status update for webcam feed on a single line.
+
+    Args:
+        frame_idx: Current frame count.
+        fps: Current processing frames per second.
+        current_count: Number of potholes in the current frame.
+        total_unique: Total unique potholes tracked so far.
+        highest_confidence: Peak confidence observed across all detections so far.
+    """
+    conf_str = f"{highest_confidence * 100:.1f}%" if highest_confidence > 0 else "0.0%"
+    line = (
+        f"\r[LIVE WEBCAM] Frame {frame_idx:5d} | "
+        f"FPS: {fps:4.1f} | "
+        f"Current: {current_count} | "
+        f"Total Unique: {total_unique} | "
+        f"Max Conf: {conf_str}"
+    )
+    sys.stdout.write(line)
+    sys.stdout.flush()
+
+
+def print_final_summary(
+    source_name: str,
+    processed_frames: int,
+    total_frames: int,
+    unique_potholes: int,
+    total_instances: int,
+    highest_confidence: float,
+    avg_fps: float,
+    output_path: Optional[Path] = None,
+    log_path: Optional[Path] = None,
+) -> None:
+    """Print the final detection summary report to terminal.
+
+    Args:
+        source_name: Name of video/source processed.
+        processed_frames: Number of frames successfully processed.
+        total_frames: Total number of frames in the source (or processed if unknown).
+        unique_potholes: Number of distinct unique potholes identified.
+        total_instances: Total pothole detection occurrences summed across all frames.
+        highest_confidence: Maximum confidence score observed (0.0 to 1.0).
+        avg_fps: Average frames per second achieved during processing.
+        output_path: Optional path to saved annotated output video.
+        log_path: Optional path to saved JSONL detection log.
+    """
+    conf_str = f"{highest_confidence * 100:.1f}%" if highest_confidence > 0 else "N/A"
+    total_str = f"{total_frames}" if total_frames > 0 else f"{processed_frames}"
+
+    print("\n")
+    print("=" * 60)
+    print("              POTHOLE DETECTION FINAL SUMMARY")
+    print("=" * 60)
+    print(f"  Source:                    {source_name}")
+    print(f"  Processed Frames:          {processed_frames} / {total_str}")
+    if unique_potholes > 0:
+        print(f"  Total Potholes Detected:   {unique_potholes} unique pothole(s)")
+        print(f"  Total Detection Events:    {total_instances} frame instances")
+    else:
+        print(f"  Total Potholes Detected:   0 potholes")
+    print(f"  Highest Confidence:        {conf_str}")
+    print(f"  Average FPS:               {avg_fps:.1f}")
+    if output_path:
+        print(f"  Annotated Video Saved To:  {output_path}")
+    if log_path:
+        print(f"  Detection Log:             {log_path}")
+    print("=" * 60)
+    print()
+
+
+
 def save_annotated_image(image: np.ndarray, original_name: str) -> Path:
     """Save an annotated BGR frame to the outputs directory.
 

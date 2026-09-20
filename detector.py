@@ -2,6 +2,8 @@
 from typing import List, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+import threading
+import queue
 import time
 import cv2
 import numpy as np
@@ -25,6 +27,7 @@ class PotholeDetection:
     # Frame dimensions needed for relative-area severity calculation
     frame_width: int = 0
     frame_height: int = 0
+    track_id: Optional[int] = None
 
     @property
     def bbox(self) -> Tuple[int, int, int, int]:
@@ -64,12 +67,22 @@ class PotholeDetection:
 
     @property
     def severity(self) -> str:
-        """Qualitative severity class based on bbox area relative to frame.
+        """Qualitative severity class based on perspective-normalized bbox area.
 
-        Thresholds:
-            area_ratio < 2%   → "Low"
-            area_ratio < 8%   → "Medium"
-            area_ratio >= 8%  → "High"
+        Raw area ratio (bbox_area / frame_area) is divided by a depth scale
+        factor derived from the detection's vertical position in the frame.
+        This compensates for perspective: as a dashcam approaches a pothole,
+        its apparent pixel size grows — without this correction a small pothole
+        would be falsely escalated to "High" just because the car drove closer.
+
+        Depth scale is linearly interpolated between:
+            DEPTH_FAR_SCALE  (config default: 0.25) at the top of the frame
+            DEPTH_NEAR_SCALE (config default: 1.0 ) at the bottom of the frame
+
+        Thresholds (applied to adjusted ratio):
+            adjusted_ratio < 2%   → "Low"
+            adjusted_ratio < 8%   → "Medium"
+            adjusted_ratio >= 8%  → "High"
 
         Returns:
             One of "Low", "Medium", "High", or "Unknown" when frame dims missing.
@@ -77,9 +90,21 @@ class PotholeDetection:
         ratio = self.area_ratio
         if ratio == 0.0 and (self.frame_width == 0 or self.frame_height == 0):
             return "Unknown"
-        if ratio < 0.02:
+
+        # Depth compensation via Y-position heuristic.
+        # y_norm=0 → top of frame (far away); y_norm=1 → bottom (right in front).
+        if self.frame_height > 0:
+            y_norm = max(0.0, min(1.0, self.centroid[1] / self.frame_height))
+            far_s = config.DEPTH_FAR_SCALE
+            near_s = config.DEPTH_NEAR_SCALE
+            depth_scale = far_s + (near_s - far_s) * y_norm
+            adjusted_ratio = ratio / depth_scale
+        else:
+            adjusted_ratio = ratio
+
+        if adjusted_ratio < 0.02:
             return "Low"
-        if ratio < 0.08:
+        if adjusted_ratio < 0.08:
             return "Medium"
         return "High"
 
@@ -177,12 +202,12 @@ class PotholeDetector:
         frame_height, frame_width = frame.shape[:2]
         start_time = time.perf_counter()
 
-        # Run YOLO inference
+        # Run YOLO inference (image size auto-selected for device: 320 on CPU, 640 on GPU)
         raw_results = self.model.predict(
             source=frame,
             conf=self.confidence_threshold,
             iou=self.iou_threshold,
-            imgsz=config.IMAGE_SIZE,
+            imgsz=config.get_image_size(),
             device=self.device,
             verbose=False,
         )
@@ -267,6 +292,7 @@ class PotholeDetector:
         frame: np.ndarray,
         result: DetectionResult,
         show_hud: bool = True,
+        total_count: Optional[int] = None,
     ) -> np.ndarray:
         """Draw bounding boxes, severity labels, corner accents, and HUD overlay.
 
@@ -274,6 +300,7 @@ class PotholeDetector:
             frame: OpenCV BGR image.
             result: DetectionResult from :meth:`detect`.
             show_hud: Render the count/FPS status bar in the top corners.
+            total_count: Cumulative unique potholes detected across video stream.
 
         Returns:
             Annotated copy of the input frame (does not modify in-place).
@@ -312,8 +339,9 @@ class PotholeDetector:
             cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), accent_c, accent_t, cv2.LINE_AA)
             cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), accent_c, accent_t, cv2.LINE_AA)
 
-            # Label badge: "Pothole 87% [High]"
-            label = f"{det.label} [{det.severity}]"
+            # Label badge: e.g. "#1 Pothole 87% [High]"
+            track_prefix = f"#{det.track_id} " if det.track_id is not None else ""
+            label = f"{track_prefix}{det.label} [{det.severity}]"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.60
             font_thickness = 2
@@ -346,7 +374,10 @@ class PotholeDetector:
             margin = 12
 
             # Pothole count card (top-left)
-            count_text = f"Potholes: {result.count}"
+            if total_count is not None:
+                count_text = f"Potholes: {result.count} (Total: {total_count})"
+            else:
+                count_text = f"Potholes: {result.count}"
             status_color = (40, 140, 255) if result.count > 0 else (80, 210, 80)
             (cw, _), _ = cv2.getTextSize(count_text, font, 0.6, 2)
             card_w = cw + 46
@@ -374,3 +405,253 @@ class PotholeDetector:
                 )
 
         return annotated
+
+
+class ThreadedInferencePipeline:
+    """Runs YOLO inference in a background thread so video I/O never stalls.
+
+    The main loop feeds raw frames into an input queue; the worker thread
+    pulls frames, runs ``PotholeDetector.detect()``, and pushes
+    ``DetectionResult`` objects into an output queue.  The main loop reads
+    results without blocking beyond a short timeout, and falls back to the
+    last known result when the worker hasn't finished yet.
+
+    Usage::
+
+        with ThreadedInferencePipeline(detector) as pipe:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                pipe.put(frame)
+                result = pipe.get()   # returns last known result if worker busy
+                ...
+
+    Args:
+        detector: An initialised :class:`PotholeDetector`.
+        maxsize: Input queue depth.  Keep at 1 to always run inference on the
+            freshest frame (drop stale frames when the queue is full).
+    """
+
+    def __init__(self, detector: "PotholeDetector", maxsize: int = 1) -> None:
+        self._detector = detector
+        self._in_q: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._out_q: queue.Queue = queue.Queue(maxsize=2)
+        self._last_result: Optional[DetectionResult] = None
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._worker, daemon=True, name="inference-worker"
+        )
+
+    def start(self) -> "ThreadedInferencePipeline":
+        """Start the background inference thread."""
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        """Signal the worker to stop and wait for it to finish."""
+        self._stop_event.set()
+        try:
+            self._in_q.put_nowait(None)  # sentinel to unblock worker
+        except queue.Full:
+            pass
+        self._thread.join(timeout=5.0)
+
+    def put(self, frame: np.ndarray) -> None:
+        """Submit a frame for inference.
+
+        If the worker is still busy (queue full), the stale pending frame is
+        discarded so the worker always processes the most recent input.
+        """
+        try:
+            self._in_q.put_nowait(frame)
+        except queue.Full:
+            try:
+                self._in_q.get_nowait()   # discard stale frame
+            except queue.Empty:
+                pass
+            try:
+                self._in_q.put_nowait(frame)
+            except queue.Full:
+                pass
+
+    def get(self, timeout: float = 0.04) -> Optional[DetectionResult]:
+        """Return the most recent completed ``DetectionResult``.
+
+        Blocks up to *timeout* seconds for a new result; returns the cached
+        last result (or ``None`` before the first result arrives) if the
+        worker hasn't finished yet.
+        """
+        try:
+            result = self._out_q.get(timeout=timeout)
+            self._last_result = result
+        except queue.Empty:
+            result = self._last_result
+        return result
+
+    def _worker(self) -> None:
+        """Background thread body: frames in → detect() → results out."""
+        while not self._stop_event.is_set():
+            try:
+                frame = self._in_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if frame is None:
+                break   # sentinel — shut down cleanly
+            try:
+                result = self._detector.detect(frame)
+                # Drain output queue before pushing to avoid stale accumulation
+                try:
+                    self._out_q.get_nowait()
+                except queue.Empty:
+                    pass
+                self._out_q.put_nowait(result)
+            except Exception:
+                pass
+
+    # ---- context manager ----
+    def __enter__(self) -> "ThreadedInferencePipeline":
+        return self.start()
+
+    def __exit__(self, *_) -> None:
+        self.stop()
+
+
+class TrackedPothole:
+    """Represents a single pothole tracked across consecutive video frames."""
+
+    def __init__(self, track_id: int, initial_det: PotholeDetection):
+        self.track_id = track_id
+        self.box = (initial_det.x1, initial_det.y1, initial_det.x2, initial_det.y2)
+        self.centroid = initial_det.centroid
+        self.max_confidence = initial_det.confidence
+        self.hits = 1
+        self.age = 0
+        self.severities = [initial_det.severity]
+
+    def update(self, det: PotholeDetection) -> None:
+        self.box = (det.x1, det.y1, det.x2, det.y2)
+        self.centroid = det.centroid
+        self.max_confidence = max(self.max_confidence, det.confidence)
+        self.hits += 1
+        self.age = 0
+        self.severities.append(det.severity)
+
+    @property
+    def peak_severity(self) -> str:
+        order = {"High": 3, "Medium": 2, "Low": 1, "Unknown": 0}
+        return max(self.severities, key=lambda s: order.get(s, 0))
+
+
+class PotholeTracker:
+    """Tracks potholes across video frames to count unique potholes and monitor peak confidence.
+
+    Matches detections across consecutive frames using IoU (Intersection-over-Union)
+    and normalized centroid proximity, keeping track of unique pothole IDs and
+    the highest confidence score seen across the entire video stream.
+    """
+
+    def __init__(
+        self,
+        iou_threshold: float = 0.20,
+        max_age: int = 15,
+        min_hits: int = 3,
+    ) -> None:
+        self.iou_threshold = iou_threshold
+        self.max_age = max_age
+        self.min_hits = min_hits
+        self.next_id = 1
+        self.tracks: dict[int, TrackedPothole] = {}
+        self.max_confidence_overall: float = 0.0
+        self.total_detection_instances: int = 0
+
+    def update(
+        self,
+        detections: List[PotholeDetection],
+        frame_width: int,
+        frame_height: int,
+    ) -> int:
+        """Update tracker with detections from the current frame.
+
+        Populates ``det.track_id`` on matched/new detections.
+
+        Returns:
+            Current count of confirmed unique potholes.
+        """
+        self.total_detection_instances += len(detections)
+        for det in detections:
+            if det.confidence > self.max_confidence_overall:
+                self.max_confidence_overall = det.confidence
+
+        diag = (frame_width**2 + frame_height**2)**0.5 if (frame_width and frame_height) else 1.0
+
+        active_tracks = [t for t in self.tracks.values() if t.age <= self.max_age]
+        matched_track_ids = set()
+        matched_det_indices = set()
+
+        for track in active_tracks:
+            best_score = 0.0
+            best_idx = None
+            tx1, ty1, tx2, ty2 = track.box
+            tcx, tcy = track.centroid
+
+            for di, det in enumerate(detections):
+                if di in matched_det_indices:
+                    continue
+                # Bounding box IoU
+                ix1 = max(tx1, det.x1)
+                iy1 = max(ty1, det.y1)
+                ix2 = min(tx2, det.x2)
+                iy2 = min(ty2, det.y2)
+                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                union = (tx2 - tx1) * (ty2 - ty1) + det.area - inter
+                iou = inter / union if union > 0 else 0.0
+
+                # Centroid proximity normalized by frame diagonal
+                dcx, dcy = det.centroid
+                cdist = ((tcx - dcx)**2 + (tcy - dcy)**2)**0.5 / diag
+
+                score = iou
+                if score == 0.0 and cdist < 0.10:
+                    score = 0.25
+
+                if score > best_score:
+                    best_score = score
+                    best_idx = di
+
+            if best_idx is not None and best_score >= self.iou_threshold:
+                det = detections[best_idx]
+                track.update(det)
+                det.track_id = track.track_id
+                matched_track_ids.add(track.track_id)
+                matched_det_indices.add(best_idx)
+
+        # Increment age for active tracks not matched in this frame
+        for track in self.tracks.values():
+            if track.track_id not in matched_track_ids:
+                track.age += 1
+
+        # Unmatched detections initialize new tracks
+        for di, det in enumerate(detections):
+            if di not in matched_det_indices:
+                tid = self.next_id
+                self.next_id += 1
+                new_track = TrackedPothole(tid, det)
+                self.tracks[tid] = new_track
+                det.track_id = tid
+
+        return self.unique_count
+
+    @property
+    def unique_count(self) -> int:
+        """Count of confirmed unique potholes (seen in at least min_hits frames)."""
+        confirmed = [t for t in self.tracks.values() if t.hits >= self.min_hits]
+        if confirmed:
+            return len(confirmed)
+        return len(self.tracks) if self.tracks else 0
+
+    @property
+    def highest_confidence(self) -> float:
+        """Maximum confidence score observed across all detections."""
+        return self.max_confidence_overall
+
