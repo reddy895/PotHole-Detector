@@ -35,3 +35,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# WhatsApp Bot Microservice
+whatsapp_bot/node_modules/
+whatsapp_bot/.wwebjs_auth/
+whatsapp_bot/.wwebjs_cache/
+
