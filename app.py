@@ -32,6 +32,7 @@ import numpy as np
 from config import config
 from detector import PotholeDetector
 from utils.helpers import get_device_info
+from utils.whatsapp_notifier import WhatsAppNotifier
 
 # ---------------------------------------------------------------------------
 # App Setup
@@ -40,6 +41,15 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB upload limit
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Shared WhatsApp Notifier instance
+whatsapp_notifier = WhatsAppNotifier(
+    authority_phone=config.WHATSAPP_AUTHORITY_PHONE,
+    enabled=config.WHATSAPP_ENABLED,
+    min_severity=config.WHATSAPP_MIN_SEVERITY,
+    port=config.WHATSAPP_PORT,
+)
+
 
 # ---------------------------------------------------------------------------
 # Global detector (lazy-loaded)
@@ -114,9 +124,18 @@ def webcam_generator():
 
             result = detector.detect(frame)
             annotated = detector.draw_annotations(frame, result, show_hud=True)
+
+            # Automated WhatsApp alert dispatch for high-severity potholes
+            if whatsapp_notifier.is_configured and result.count > 0:
+                for det in result.detections:
+                    if det.severity in ("Medium", "High"):
+                        whatsapp_notifier.send_pothole_alert(det, annotated, source_name="Webcam Stream")
+                        break
+
             yield _mjpeg_boundary(_encode_jpeg(annotated))
     finally:
         cap.release()
+
 
 
 # ---------------------------------------------------------------------------
@@ -143,10 +162,21 @@ def video_file_generator(video_path):
                 break
             result = detector.detect(frame)
             annotated = detector.draw_annotations(frame, result, show_hud=True)
+
+            # Automated WhatsApp alert dispatch for high-severity potholes
+            if whatsapp_notifier.is_configured and result.count > 0:
+                for det in result.detections:
+                    if det.severity in ("Medium", "High"):
+                        whatsapp_notifier.send_pothole_alert(
+                            det, annotated, source_name=Path(video_path).name
+                        )
+                        break
+
             yield _mjpeg_boundary(_encode_jpeg(annotated))
             time.sleep(delay)
     finally:
         cap.release()
+
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +320,78 @@ def api_set_confidence():
     detector = get_detector()
     detector.confidence_threshold = threshold
     return jsonify({"status": "ok", "confidence_threshold": threshold})
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp Bot REST Endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/api/whatsapp/status", methods=["GET"])
+def api_whatsapp_status():
+    """Retrieve WhatsApp microservice connectivity, authentication, and QR status."""
+    is_running = whatsapp_notifier.is_service_running()
+    details = whatsapp_notifier.get_status() if is_running else {}
+    qr_img = config.OUTPUTS_DIR / "whatsapp_qr.png"
+    return jsonify({
+        "service_running": is_running,
+        "enabled": whatsapp_notifier.enabled,
+        "is_configured": whatsapp_notifier.is_configured,
+        "authority_phone": whatsapp_notifier.authority_phone,
+        "min_severity": whatsapp_notifier.min_severity,
+        "status": details.get("status", "offline"),
+        "ready": details.get("ready", False),
+        "connected_user": details.get("user"),
+        "qr_available": details.get("qr_available", False) or qr_img.is_file(),
+    })
+
+
+@app.route("/api/whatsapp/start", methods=["POST"])
+def api_whatsapp_start():
+    """Start the WhatsApp bot microservice in background."""
+    started = whatsapp_notifier.start_service()
+    return jsonify({
+        "success": started,
+        "running": whatsapp_notifier.is_service_running(),
+        "status": whatsapp_notifier.get_status(),
+    })
+
+
+@app.route("/api/whatsapp/configure", methods=["POST"])
+def api_whatsapp_configure():
+    """Configure authority recipient phone number and toggle alerts."""
+    data = request.get_json(silent=True) or {}
+    phone = data.get("phone")
+    enabled = data.get("enabled")
+    min_severity = data.get("min_severity")
+
+    if phone is not None:
+        whatsapp_notifier.authority_phone = str(phone).strip()
+    if enabled is not None:
+        whatsapp_notifier.enabled = bool(enabled)
+    if min_severity in ("Low", "Medium", "High"):
+        whatsapp_notifier.min_severity = min_severity
+
+    # Automatically start service if enabled
+    if whatsapp_notifier.enabled and not whatsapp_notifier.is_service_running():
+        whatsapp_notifier.start_service()
+
+    return jsonify({
+        "status": "ok",
+        "enabled": whatsapp_notifier.enabled,
+        "authority_phone": whatsapp_notifier.authority_phone,
+        "min_severity": whatsapp_notifier.min_severity,
+        "is_configured": whatsapp_notifier.is_configured,
+    })
+
+
+@app.route("/api/whatsapp/qr.png", methods=["GET"])
+def api_whatsapp_qr_image():
+    """Serve the latest WhatsApp authentication QR code image."""
+    qr_path = config.OUTPUTS_DIR / "whatsapp_qr.png"
+    if qr_path.is_file():
+        return send_from_directory(str(config.OUTPUTS_DIR), "whatsapp_qr.png", mimetype="image/png")
+    return jsonify({"error": "QR code image not generated yet. Start service first."}), 404
+
 
 
 # ---------------------------------------------------------------------------
