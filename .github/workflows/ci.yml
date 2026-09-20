@@ -41,6 +41,8 @@ jobs:
           python -m py_compile utils/helpers.py
           python -m py_compile utils/logger.py
           python -m py_compile utils/download_weights.py
+          python -m py_compile utils/whatsapp_notifier.py
+          python -m py_compile link_whatsapp.py
           echo "All modules compiled successfully."
 
   test-config:
@@ -62,7 +64,11 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install opencv-python-headless numpy pillow flask
+          pip install opencv-python-headless numpy pillow flask pytest
+
+      - name: Run Pytest Suite
+        run: |
+          pytest tests/ -v
 
       - name: Smoke-test config module
         run: |
