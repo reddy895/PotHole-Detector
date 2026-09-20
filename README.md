@@ -150,6 +150,31 @@ FPS: 35
 | `--conf` | `float` (0.0 to 1.0) | Confidence threshold for detection. | `0.35` |
 | `--cam-idx` | `int` | Camera index (for external or USB cameras). | `0` |
 | `--no-view` | flag | Run in headless mode without opening GUI windows. | False |
+| `--whatsapp` | flag | Enable automated WhatsApp hazard alerts to authorities. | False |
+| `--authority-phone` | `str` (e.g. `+919876543210`) | Recipient authority phone number with country code. | None |
+
+---
+
+## 📲 Automated WhatsApp Authority Alert Bot
+
+The system features an automated WhatsApp bot that dispatches real-time hazard reports with annotated photos to municipal or highway authorities whenever high-severity potholes are detected.
+
+### 1. Linking Your WhatsApp Account (QR Code)
+Run the setup utility to authenticate your personal WhatsApp account via QR code:
+```bash
+python link_whatsapp.py
+```
+1. A QR code will display in your terminal (and save to `outputs/whatsapp_qr.png`).
+2. Open WhatsApp on your phone -> **Settings** -> **Linked Devices** -> **Link a Device**.
+3. Scan the QR code.
+4. Your session is saved securely in `whatsapp_bot/.wwebjs_auth/` so you **do not** need to re-scan on future runs!
+
+### 2. Dispatching Alerts to Authorities
+Run detection with WhatsApp alerts enabled:
+```bash
+python main.py --source video --input road.mp4 --whatsapp --authority-phone +919876543210
+```
+Or simply run `python main.py` and answer `y` when prompted in the interactive menu!
 
 ---
 
@@ -161,9 +186,7 @@ The `PotholeDetector` class in `detector.py` is strictly decoupled from the UI a
 detector.register_alert_handler(your_callback_function)
 ```
 
-This allows you to attach future modules without touching the core detection engine:
-- **WhatsApp Bot**: Send incident alerts and snapshots automatically.
 - **GPS Telemetry**: Tag coordinates of detected potholes for municipal road maintenance.
 - **Hazard Database**: Log pothole severity, size, and frequency to a database.
 - **Multi-class Road Hazard Models**: Easily swap weights to detect cracks, debris, or speed bumps.
-# PotHole-Detector
+
