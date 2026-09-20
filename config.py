@@ -94,6 +94,14 @@ class Config:
     DEFAULT_CAMERA_INDEX: int = 0
     WINDOW_TITLE: str = "AI Pothole Detection System (Press Q to quit)"
 
+    # WhatsApp Automated Municipal Alert System
+    WHATSAPP_ENABLED: bool = os.getenv("POTHOLE_WHATSAPP_ENABLED", "0").lower() in ("1", "true", "yes")
+    WHATSAPP_AUTHORITY_PHONE: str = os.getenv("POTHOLE_AUTHORITY_PHONE", "")
+    WHATSAPP_PORT: int = int(os.getenv("POTHOLE_WHATSAPP_PORT", "5005"))
+    WHATSAPP_MIN_SEVERITY: str = os.getenv("POTHOLE_WHATSAPP_MIN_SEVERITY", "Medium")
+    WHATSAPP_COOLDOWN_SECONDS: float = float(os.getenv("POTHOLE_WHATSAPP_COOLDOWN", "30.0"))
+
+
     def __init__(self):
         """Ensure runtime directories exist."""
         self.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
