@@ -24,8 +24,8 @@ class Config:
     GPU_IMAGE_SIZE: int = int(os.getenv("POTHOLE_GPU_IMG_SIZE", "640"))
 
 
-    # Target processing & playback FPS for video mode (0 = unthrottled maximum speed).
-    TARGET_VIDEO_FPS: float = float(os.getenv("POTHOLE_TARGET_FPS", "0"))
+    # Target processing & playback FPS for video mode (15 FPS max as configured).
+    TARGET_VIDEO_FPS: float = float(os.getenv("POTHOLE_TARGET_FPS", "15.0"))
     DEFAULT_SKIP_FRAMES: int = int(os.getenv("POTHOLE_SKIP_FRAMES", "1"))
 
 

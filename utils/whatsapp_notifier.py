@@ -85,6 +85,14 @@ class WhatsAppNotifier:
             return False
 
         print(f"[WHATSAPP] Launching WhatsApp bot on port {self.port}...")
+        auth_dir = _PROJECT_ROOT / "whatsapp_bot" / ".wwebjs_auth"
+        if auth_dir.is_dir():
+            for p in auth_dir.glob("**/Singleton*"):
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
         env = dict(subprocess.os.environ)
         env["WHATSAPP_PORT"] = str(self.port)
         env["NODE_ENV"] = "production"

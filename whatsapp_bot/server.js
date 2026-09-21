@@ -22,6 +22,26 @@ let qrString = null;
 let qrDataUrl = null;
 let clientInfo = null;
 
+// Clean stale Chrome Singleton lock files so Chrome launches reliably every time
+function cleanSingletonLocks(dir) {
+    if (!fs.existsSync(dir)) return;
+    try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+            const fullPath = path.join(dir, file);
+            try {
+                if (fs.statSync(fullPath).isDirectory()) {
+                    cleanSingletonLocks(fullPath);
+                } else if (file.startsWith('Singleton')) {
+                    fs.unlinkSync(fullPath);
+                    console.log(`[WHATSAPP BOT] Cleaned lock file: ${fullPath}`);
+                }
+            } catch (e) {}
+        }
+    } catch (e) {}
+}
+cleanSingletonLocks(AUTH_DIR);
+
 // Locate Google Chrome executable
 const CHROME_PATH = fs.existsSync('/usr/bin/google-chrome')
     ? '/usr/bin/google-chrome'

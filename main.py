@@ -146,14 +146,22 @@ def run_image_mode(
         save_detection_log(result, source_name=image_path.name, frame_idx=1)
 
     # Dispatch WhatsApp alert to authority if configured
+    wa_msg = None
     if notifier and notifier.is_configured and result.count > 0:
         for det in result.detections:
-            notifier.send_pothole_alert(
+            sent = notifier.send_pothole_alert(
                 detection=det,
                 frame=annotated_frame,
                 source_name=image_path.name,
+                async_dispatch=False,
             )
+            if sent:
+                wa_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole [{det.severity}]"
+                print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} [{det.severity}]")
             break
+
+    if wa_msg:
+        annotated_frame = detector.draw_annotations(frame, result, show_hud=True, whatsapp_msg=wa_msg)
 
     log_file = (config.OUTPUTS_DIR / "detection_log.jsonl") if save_log else None
 
@@ -172,8 +180,9 @@ def run_image_mode(
     if not no_view:
         window_title = f"{config.WINDOW_TITLE} - {image_path.name}"
         cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         cv2.imshow(window_title, annotated_frame)
-        print("\nDisplaying image preview. Press any key in the image window to exit...")
+        print("\nDisplaying image preview (Full Screen). Press any key to exit...")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
@@ -208,9 +217,9 @@ def run_video_mode(
         sys.exit(1)
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    target_fps = float(config.TARGET_VIDEO_FPS)
-    target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0.0
-    output_fps = target_fps if target_fps > 0 else (cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS)
+    target_fps = 15.0
+    target_frame_time = 1.0 / target_fps
+    output_fps = target_fps
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -223,8 +232,7 @@ def run_video_mode(
         device_name=detector.device_name,
     )
     skip_info = f" | Frame-skip: {skip_frames}" if skip_frames > 0 else ""
-    speed_mode = f"Target FPS: {target_fps:.1f}" if target_fps > 0 else "Maximum Speed (Unthrottled)"
-    print(f"Resolution: {width}x{height} | Frames: {total_frames} | {speed_mode}{skip_info}")
+    print(f"Resolution: {width}x{height} | Frames: {total_frames} | Max 15 FPS | Recursive Loop (Full Screen){skip_info}")
     print(f"Output: {out_path}\n")
 
     frame_idx = 0
@@ -232,9 +240,12 @@ def run_video_mode(
     fps_history = []
     tracker = PotholeTracker(min_hits=min(3, max(1, total_frames // 15)))
     last_result = None
+    last_whatsapp_msg = None
+    last_whatsapp_time = 0.0
 
     if not no_view:
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(config.WINDOW_TITLE, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -242,7 +253,11 @@ def run_video_mode(
                 loop_start = time.perf_counter()
                 ret, frame = cap.read()
                 if not ret or frame is None:
-                    break
+                    # Recursive continuous loop until stopped by user
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        break
 
                 frame_idx += 1
 
@@ -263,9 +278,28 @@ def run_video_mode(
                 total_potholes_found += result.count
 
                 work_duration = time.perf_counter() - loop_start
-                remaining_time = max(0.0, target_frame_time - work_duration) if target_frame_time > 0 else 0.0
-                current_fps = (min(target_fps, 1.0 / target_frame_time) if remaining_time > 0 else 1.0 / max(0.0001, work_duration)) if target_frame_time > 0 else (1.0 / max(0.0001, work_duration))
+                remaining_time = max(0.0, target_frame_time - work_duration)
+                effective_frame_time = work_duration + remaining_time
+                current_fps = min(15.0, 1.0 / max(0.0001, effective_frame_time))
                 fps_history.append(current_fps)
+
+                # Dispatch automated WhatsApp alert for detected potholes
+                if notifier and notifier.is_configured and result.count > 0:
+                    for det in result.detections:
+                        sent = notifier.send_pothole_alert(
+                            detection=det,
+                            frame=annotated_frame if 'annotated_frame' in locals() else frame,
+                            source_name=video_path.name,
+                            async_dispatch=True,
+                        )
+                        if sent:
+                            track_str = f"#{det.track_id}" if det.track_id is not None else "N/A"
+                            last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.severity}]"
+                            last_whatsapp_time = time.time()
+                            print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.severity}] ({det.confidence*100:.1f}%)")
+                        break
+
+                active_wa_msg = last_whatsapp_msg if (time.time() - last_whatsapp_time) < 4.0 else None
 
                 annotated_frame = detector.draw_annotations(
                     frame,
@@ -273,25 +307,15 @@ def run_video_mode(
                     show_hud=True,
                     total_count=tracker.unique_count,
                     override_fps=current_fps,
+                    whatsapp_msg=active_wa_msg,
                 )
                 writer.write(annotated_frame)
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
 
-                # Dispatch automated WhatsApp alert for detected potholes
-                if notifier and notifier.is_configured and result.count > 0:
-                    for det in result.detections:
-                        notifier.send_pothole_alert(
-                            detection=det,
-                            frame=annotated_frame,
-                            source_name=video_path.name,
-                            async_dispatch=True,
-                        )
-                        break
-
                 print_progress_bar(
-                    frame_idx=frame_idx,
+                    frame_idx=frame_idx % max(1, total_frames),
                     total_frames=total_frames,
                     fps=current_fps,
                     current_potholes=tracker.unique_count,
@@ -374,8 +398,12 @@ def run_webcam_mode(
     fps_history = []
     tracker = PotholeTracker(min_hits=3)
     last_result = None
+    last_whatsapp_msg = None
+    last_whatsapp_time = 0.0
+
     if not no_view:
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(config.WINDOW_TITLE, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -405,9 +433,28 @@ def run_webcam_mode(
                 total_potholes_found += result.count
 
                 work_duration = time.perf_counter() - loop_start
-                remaining_time = target_frame_time - work_duration
-                current_fps = min(target_fps, 1.0 / target_frame_time) if remaining_time > 0 else 1.0 / work_duration
+                remaining_time = max(0.0, target_frame_time - work_duration)
+                effective_frame_time = work_duration + remaining_time
+                current_fps = min(15.0, 1.0 / max(0.0001, effective_frame_time))
                 fps_history.append(current_fps)
+
+                # Dispatch automated WhatsApp alert for detected potholes
+                if notifier and notifier.is_configured and result.count > 0:
+                    for det in result.detections:
+                        sent = notifier.send_pothole_alert(
+                            detection=det,
+                            frame=annotated_frame if 'annotated_frame' in locals() else frame,
+                            source_name=f"webcam:{cam_idx}",
+                            async_dispatch=True,
+                        )
+                        if sent:
+                            track_str = f"#{det.track_id}" if det.track_id is not None else "N/A"
+                            last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.severity}]"
+                            last_whatsapp_time = time.time()
+                            print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.severity}] ({det.confidence*100:.1f}%)")
+                        break
+
+                active_wa_msg = last_whatsapp_msg if (time.time() - last_whatsapp_time) < 4.0 else None
 
                 annotated_frame = detector.draw_annotations(
                     frame,
@@ -415,21 +462,11 @@ def run_webcam_mode(
                     show_hud=True,
                     total_count=tracker.unique_count,
                     override_fps=current_fps,
+                    whatsapp_msg=active_wa_msg,
                 )
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
-
-                # Dispatch automated WhatsApp alert for detected potholes
-                if notifier and notifier.is_configured and result.count > 0:
-                    for det in result.detections:
-                        notifier.send_pothole_alert(
-                            detection=det,
-                            frame=annotated_frame,
-                            source_name=f"webcam:{cam_idx}",
-                            async_dispatch=True,
-                        )
-                        break
 
                 print_webcam_status(
                     frame_idx=frame_idx,

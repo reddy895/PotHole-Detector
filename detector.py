@@ -294,6 +294,7 @@ class PotholeDetector:
         show_hud: bool = True,
         total_count: Optional[int] = None,
         override_fps: Optional[float] = None,
+        whatsapp_msg: Optional[str] = None,
     ) -> np.ndarray:
         """Draw bounding boxes, severity labels, corner accents, and HUD overlay.
 
@@ -405,6 +406,21 @@ class PotholeDetector:
                 cv2.putText(
                     annotated, fps_text, (x2_card + 16, margin + 24),
                     font, 0.6, (240, 240, 240), 2, cv2.LINE_AA,
+                )
+
+            if whatsapp_msg:
+                msg_font_scale = 0.55
+                (mw, mh), _ = cv2.getTextSize(whatsapp_msg, font, msg_font_scale, 2)
+                card3_h = 36
+                card3_w = mw + 36
+                card3_x = max(margin, (width - card3_w) // 2)
+                card3_y = height - margin - card3_h
+
+                cv2.rectangle(annotated, (card3_x, card3_y), (card3_x + card3_w, card3_y + card3_h), (16, 40, 20), -1)
+                cv2.rectangle(annotated, (card3_x, card3_y), (card3_x + card3_w, card3_y + card3_h), (40, 210, 80), 2)
+                cv2.putText(
+                    annotated, whatsapp_msg, (card3_x + 18, card3_y + 24),
+                    font, msg_font_scale, (220, 255, 220), 2, cv2.LINE_AA,
                 )
 
         return annotated
