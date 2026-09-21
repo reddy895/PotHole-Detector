@@ -164,6 +164,9 @@ app.post('/send', async (req, res) => {
 
     // Clean and normalize phone number
     let cleanNumber = phone.replace(/\D/g, '');
+    if (cleanNumber.length === 10) {
+        cleanNumber = `91${cleanNumber}`;
+    }
     if (!cleanNumber.endsWith('@c.us')) {
         cleanNumber = `${cleanNumber}@c.us`;
     }

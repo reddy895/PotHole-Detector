@@ -5,13 +5,13 @@ from utils.whatsapp_notifier import WhatsAppNotifier
 
 def test_whatsapp_notifier_initialization():
     notifier = WhatsAppNotifier(
-        authority_phone="+919876543210",
+        authority_phone="+919591152862",
         enabled=True,
         min_severity="High",
         cooldown_seconds=30.0,
     )
     assert notifier.is_configured is True
-    assert notifier.authority_phone == "+919876543210"
+    assert notifier.authority_phone == "+919591152862"
     assert notifier.min_severity == "High"
     assert notifier.cooldown_seconds == 30.0
 

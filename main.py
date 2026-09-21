@@ -88,24 +88,22 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--skip-frames",
         type=int,
-        default=0,
+        default=config.DEFAULT_SKIP_FRAMES,
         metavar="N",
-        help=(
-            "Run inference every Nth frame; reuse last result for skipped frames. "
-            "0 = no skipping (default). Example: --skip-frames 2 halves CPU load."
-        ),
+        help=f"Run inference every Nth frame (default: {config.DEFAULT_SKIP_FRAMES})",
     )
     parser.add_argument(
         "--whatsapp",
         action="store_true",
+        default=config.WHATSAPP_ENABLED,
         help="Enable automated WhatsApp hazard alerts to authorities",
     )
     parser.add_argument(
         "--authority-phone",
         type=str,
-        default=None,
+        default=config.WHATSAPP_AUTHORITY_PHONE,
         metavar="PHONE",
-        help="Authority WhatsApp phone number with country code (e.g. +919876543210)",
+        help=f"Authority WhatsApp phone number (default: {config.WHATSAPP_AUTHORITY_PHONE})",
     )
     return parser.parse_args()
 
@@ -173,6 +171,7 @@ def run_image_mode(
 
     if not no_view:
         window_title = f"{config.WINDOW_TITLE} - {image_path.name}"
+        cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
         cv2.imshow(window_title, annotated_frame)
         print("\nDisplaying image preview. Press any key in the image window to exit...")
         cv2.waitKey(0)
@@ -210,7 +209,7 @@ def run_video_mode(
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     target_fps = float(config.TARGET_VIDEO_FPS)
-    target_frame_time = 1.0 / target_fps if target_fps > 0 else 0.080
+    target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0.0
     output_fps = target_fps if target_fps > 0 else (cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS)
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -224,7 +223,8 @@ def run_video_mode(
         device_name=detector.device_name,
     )
     skip_info = f" | Frame-skip: {skip_frames}" if skip_frames > 0 else ""
-    print(f"Resolution: {width}x{height} | Frames: {total_frames} | Target FPS: {target_fps:.1f}{skip_info}")
+    speed_mode = f"Target FPS: {target_fps:.1f}" if target_fps > 0 else "Maximum Speed (Unthrottled)"
+    print(f"Resolution: {width}x{height} | Frames: {total_frames} | {speed_mode}{skip_info}")
     print(f"Output: {out_path}\n")
 
     frame_idx = 0
@@ -232,6 +232,9 @@ def run_video_mode(
     fps_history = []
     tracker = PotholeTracker(min_hits=min(3, max(1, total_frames // 15)))
     last_result = None
+
+    if not no_view:
+        cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -260,8 +263,8 @@ def run_video_mode(
                 total_potholes_found += result.count
 
                 work_duration = time.perf_counter() - loop_start
-                remaining_time = target_frame_time - work_duration
-                current_fps = min(target_fps, 1.0 / target_frame_time) if remaining_time > 0 else 1.0 / work_duration
+                remaining_time = max(0.0, target_frame_time - work_duration) if target_frame_time > 0 else 0.0
+                current_fps = (min(target_fps, 1.0 / target_frame_time) if remaining_time > 0 else 1.0 / max(0.0001, work_duration)) if target_frame_time > 0 else (1.0 / max(0.0001, work_duration))
                 fps_history.append(current_fps)
 
                 annotated_frame = detector.draw_annotations(
@@ -276,16 +279,16 @@ def run_video_mode(
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
 
-                # Dispatch automated WhatsApp alert for significant potholes
+                # Dispatch automated WhatsApp alert for detected potholes
                 if notifier and notifier.is_configured and result.count > 0:
                     for det in result.detections:
-                        if det.severity in ("Medium", "High"):
-                            notifier.send_pothole_alert(
-                                detection=det,
-                                frame=annotated_frame,
-                                source_name=video_path.name,
-                            )
-                            break
+                        notifier.send_pothole_alert(
+                            detection=det,
+                            frame=annotated_frame,
+                            source_name=video_path.name,
+                            async_dispatch=True,
+                        )
+                        break
 
                 print_progress_bar(
                     frame_idx=frame_idx,
@@ -371,6 +374,8 @@ def run_webcam_mode(
     fps_history = []
     tracker = PotholeTracker(min_hits=3)
     last_result = None
+    if not no_view:
+        cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -415,16 +420,16 @@ def run_webcam_mode(
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
 
-                # Dispatch automated WhatsApp alert for significant potholes
+                # Dispatch automated WhatsApp alert for detected potholes
                 if notifier and notifier.is_configured and result.count > 0:
                     for det in result.detections:
-                        if det.severity in ("Medium", "High"):
-                            notifier.send_pothole_alert(
-                                detection=det,
-                                frame=annotated_frame,
-                                source_name=f"webcam:{cam_idx}",
-                            )
-                            break
+                        notifier.send_pothole_alert(
+                            detection=det,
+                            frame=annotated_frame,
+                            source_name=f"webcam:{cam_idx}",
+                            async_dispatch=True,
+                        )
+                        break
 
                 print_webcam_status(
                     frame_idx=frame_idx,
@@ -469,7 +474,7 @@ def run_webcam_mode(
 # Main Execution Entrypoint
 # =========================================================================
 
-def _pick_file_dialog() -> str | None:
+def _pick_file_dialog(file_type: str = "video") -> str | None:
     """Open a native file picker dialog and return selected path (or None)."""
     try:
         import tkinter as tk
@@ -478,34 +483,44 @@ def _pick_file_dialog() -> str | None:
         root = tk.Tk()
         root.withdraw()          # hide the blank root window
         root.attributes("-topmost", True)
-        file_path = filedialog.askopenfilename(
-            title="Select a Video File",
-            initialdir=os.path.expanduser("~"),   # start at home directory
-            filetypes=[
-                ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.m4v"),
-                ("All files", "*.*"),
-            ],
-        )
+        if file_type == "image":
+            file_path = filedialog.askopenfilename(
+                title="Select an Image File",
+                initialdir=os.path.expanduser("~"),
+                filetypes=[
+                    ("Image files", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff"),
+                    ("All files", "*.*"),
+                ],
+            )
+        else:
+            file_path = filedialog.askopenfilename(
+                title="Select a Video File",
+                initialdir=os.path.expanduser("~"),
+                filetypes=[
+                    ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.m4v"),
+                    ("All files", "*.*"),
+                ],
+            )
         root.destroy()
         return file_path if file_path else None
     except Exception as e:
-        print(f"  [WARN] File dialog unavailable ({e}). Enter path manually.")
+        print(f"  [WARN] Native file dialog unavailable ({e}). Enter path manually.")
         return None
 
 
 def interactive_menu() -> argparse.Namespace:
     """Display interactive terminal menu and return populated Namespace."""
     print()
-    print("=" * 48)
-    print("      AI POTHOLE DETECTION SYSTEM")
-    print("=" * 48)
+    print("=" * 56)
+    print("      AI POTHOLE DETECTION SYSTEM (TERMINAL & LIVE CV)")
+    print("=" * 56)
     print()
     print("  Select detection mode:")
     print()
-    print("  [1]  Live Video   — Real-time webcam detection")
-    print("  [2]  Video File   — Browse & detect from a video")
+    print("  [1]  Live Webcam — Real-time camera detection in OpenCV")
+    print("  [2]  Video File  — Browse & detect with live OpenCV tracking")
     print()
-    print("=" * 48)
+    print("=" * 56)
 
     while True:
         choice = input("  Enter choice (1 or 2): ").strip()
@@ -521,45 +536,32 @@ def interactive_menu() -> argparse.Namespace:
         source=None,
         input=None,
         save_log=False,
-        skip_frames=0,
-        whatsapp=False,
-        authority_phone=None,
+        skip_frames=config.DEFAULT_SKIP_FRAMES,
+        whatsapp=True,
+        authority_phone="+919591152862",
     )
 
     if choice == "1":
         ns.source = "webcam"
-        cam_input = input(f"\n  Camera device index [default: 0]: ").strip()
+        cam_input = input("\n  Camera device index [default: 0]: ").strip()
         ns.cam_idx = int(cam_input) if cam_input.isdigit() else 0
-    else:
+    elif choice == "2":
         ns.source = "video"
         print("\n  Opening file browser... (select your video file)")
-        picked = _pick_file_dialog()
+        picked = _pick_file_dialog(file_type="video")
         if picked:
             print(f"  Selected: {picked}")
             ns.input = picked
         else:
             # Fallback: manual entry
             while True:
-                path_str = input("  Enter path to video file: ").strip().strip('"').strip("'")
+                path_str = input("  Enter path to video file (or drag & drop): ").strip().strip('"').strip("'")
                 if Path(path_str).is_file():
                     ns.input = path_str
                     break
                 print(f"  [ERROR] File not found: {path_str}. Try again.")
 
-    print("\n  ----------------------------------------------")
-    print("  WhatsApp Automated Authority Alerts")
-    print("  ----------------------------------------------")
-    wa_choice = input("  Enable automated WhatsApp alerts to authorities? (y/N): ").strip().lower()
-    if wa_choice in ("y", "yes"):
-        ns.whatsapp = True
-        phone = input("  Enter authority's WhatsApp phone number (e.g. +919876543210): ").strip()
-        ns.authority_phone = phone if phone else None
-    else:
-        ns.whatsapp = False
-        ns.authority_phone = None
-
-
-    print()
+    print(f"\n  [WHATSAPP ALERT BOT] Enabled -> Auto-dispatching alerts to: {ns.authority_phone}\n")
     return ns
 
 
@@ -589,7 +591,6 @@ def main():
         print(f"\n[INITIALIZATION ERROR] {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Dispatch to appropriate mode
     # Initialize WhatsApp Notifier if requested
     notifier = None
     if getattr(args, "whatsapp", False) or config.WHATSAPP_ENABLED:
@@ -601,16 +602,10 @@ def main():
             cooldown_seconds=config.WHATSAPP_COOLDOWN_SECONDS,
             port=config.WHATSAPP_PORT,
         )
-        print("\n[WHATSAPP] Initializing automated hazard alert bot...")
+        print(f"[WHATSAPP] Bot background service target: {notifier.authority_phone}")
         started = notifier.start_service()
         if started:
-            status = notifier.get_status()
-            if not status.get("ready"):
-                authenticated = notifier.wait_for_authentication(timeout_seconds=90)
-                if not authenticated:
-                    print("[WHATSAPP WARN] WhatsApp scan pending; proceeding with detection session.")
-        else:
-            print("[WHATSAPP WARN] Could not start WhatsApp bot microservice.")
+            notifier.wait_for_authentication(timeout_seconds=2)
 
     if args.source == "image":
         run_image_mode(

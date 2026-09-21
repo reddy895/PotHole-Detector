@@ -30,7 +30,15 @@ class WhatsAppNotifier:
         port: int = 5005,
     ) -> None:
         self.enabled = enabled
-        self.authority_phone = authority_phone or config.WHATSAPP_AUTHORITY_PHONE
+        raw_phone = authority_phone or config.WHATSAPP_AUTHORITY_PHONE
+        if raw_phone:
+            cleaned = "".join(c for c in raw_phone if c.isdigit() or c == "+")
+            if cleaned.isdigit() and len(cleaned) == 10:
+                cleaned = f"+91{cleaned}"
+            self.authority_phone = cleaned
+        else:
+            self.authority_phone = "+919591152862"
+
         self.min_severity = min_severity
         self.cooldown_seconds = cooldown_seconds
         self.port = port
@@ -51,7 +59,7 @@ class WhatsAppNotifier:
     def is_service_running(self) -> bool:
         """Check if the WhatsApp microservice is currently running and responding."""
         try:
-            resp = requests.get(f"{self.base_url}/status", timeout=2.0)
+            resp = requests.get(f"{self.base_url}/status", timeout=1.5)
             return resp.status_code == 200
         except Exception:
             return False
@@ -59,7 +67,7 @@ class WhatsAppNotifier:
     def get_status(self) -> Dict[str, Any]:
         """Fetch current authentication and readiness state from microservice."""
         try:
-            resp = requests.get(f"{self.base_url}/status", timeout=2.5)
+            resp = requests.get(f"{self.base_url}/status", timeout=1.5)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
@@ -76,23 +84,20 @@ class WhatsAppNotifier:
             print(f"[WHATSAPP ERROR] Server script not found at: {bot_script}")
             return False
 
-        print(f"[WHATSAPP] Launching WhatsApp microservice on port {self.port}...")
-        env = {
-            "PATH": subprocess.os.environ.get("PATH", ""),
-            "WHATSAPP_PORT": str(self.port),
-            "NODE_ENV": "production",
-        }
+        print(f"[WHATSAPP] Launching WhatsApp bot on port {self.port}...")
+        env = dict(subprocess.os.environ)
+        env["WHATSAPP_PORT"] = str(self.port)
+        env["NODE_ENV"] = "production"
 
-        # Run process interactively to show QR code in terminal stdout
         try:
             self._process = subprocess.Popen(
                 ["node", str(bot_script)],
                 cwd=str(_PROJECT_ROOT / "whatsapp_bot"),
                 env=env,
             )
-            # Wait up to 10s for the HTTP server to bind
-            for _ in range(20):
-                time.sleep(0.5)
+            # Wait up to 3s for HTTP server
+            for _ in range(15):
+                time.sleep(0.2)
                 if self.is_service_running():
                     return True
         except Exception as e:
@@ -101,34 +106,17 @@ class WhatsAppNotifier:
 
         return self.is_service_running()
 
-    def wait_for_authentication(self, timeout_seconds: int = 90) -> bool:
-        """Poll until WhatsApp Web QR code is scanned and client is ready."""
-        print("[WHATSAPP] Checking authentication status...")
+    def wait_for_authentication(self, timeout_seconds: int = 3) -> bool:
+        """Quickly check readiness; never block or delay detection pipeline."""
         start_t = time.time()
-        qr_prompt_shown = False
-
         while (time.time() - start_t) < timeout_seconds:
             status = self.get_status()
             if status.get("ready"):
                 user_num = status.get("user") or "Authorized User"
-                print(f"\n[WHATSAPP CONNECTED] Successfully linked to WhatsApp account: +{user_num}")
+                print(f"[WHATSAPP CONNECTED] Linked to account: +{user_num}")
                 return True
+            time.sleep(0.3)
 
-            if status.get("status") == "qr_ready" and not qr_prompt_shown:
-                qr_img = status.get("qr_image_path") or (_PROJECT_ROOT / "outputs" / "whatsapp_qr.png")
-                print("\n" + "=" * 54)
-                print("           WHATSAPP QR CODE READY FOR SCAN")
-                print("=" * 54)
-                print("Please scan the QR code above with your WhatsApp app:")
-                print("  Open WhatsApp -> Settings -> Linked Devices -> Link a Device")
-                if Path(qr_img).is_file():
-                    print(f"QR Image also viewable at: {qr_img}")
-                print("=" * 54 + "\n")
-                qr_prompt_shown = True
-
-            time.sleep(1.0)
-
-        print("[WHATSAPP WARN] Authentication timed out. Alerts will be queued or skipped.")
         return False
 
     def send_pothole_alert(
@@ -137,6 +125,7 @@ class WhatsAppNotifier:
         frame: np.ndarray,
         source_name: str = "Live Feed",
         location_desc: Optional[str] = None,
+        async_dispatch: bool = False,
     ) -> bool:
         """Format and dispatch an urgent hazard alert to the municipal authority.
 
@@ -145,9 +134,10 @@ class WhatsAppNotifier:
             frame: Raw or annotated BGR frame.
             source_name: Name of video/camera source.
             location_desc: Optional GPS / route description.
+            async_dispatch: If True, deliver HTTP request in background thread to avoid CV lag.
 
         Returns:
-            True if message was accepted and sent by microservice.
+            True if alert was accepted for dispatch.
         """
         if not self.is_configured:
             return False
@@ -155,7 +145,7 @@ class WhatsAppNotifier:
         # Severity filter check
         severity_hierarchy = {"Low": 1, "Medium": 2, "High": 3}
         det_rank = severity_hierarchy.get(detection.severity, 1)
-        min_rank = severity_hierarchy.get(self.min_severity, 2)
+        min_rank = severity_hierarchy.get(self.min_severity, 1)
         if det_rank < min_rank:
             return False  # Skip minor severity potholes
 
@@ -174,58 +164,43 @@ class WhatsAppNotifier:
             if track_id is not None:
                 self._alerted_track_ids.add(track_id)
 
-        # Create annotated snapshot of the frame for the authority
         timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        clean_time = time.strftime("%Y%m%d_%H%M%S")
-        snapshot_name = f"alert_{clean_time}_track{track_id or 'unknown'}.jpg"
-        snapshot_path = self.alerts_dir / snapshot_name
-
-        snapshot_frame = frame.copy()
-        # Highlight pothole bounding box on snapshot
-        x1, y1, x2, y2 = detection.x1, detection.y1, detection.x2, detection.y2
-        box_color = (0, 30, 220) if detection.severity == "High" else (0, 165, 255)
-        cv2.rectangle(snapshot_frame, (x1, y1), (x2, y2), box_color, 3, cv2.LINE_AA)
-        label = f"HAZARD: #{track_id or 1} {detection.label} [{detection.severity}]"
-        cv2.putText(
-            snapshot_frame, label, (x1, max(25, y1 - 10)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
-        )
-        cv2.imwrite(str(snapshot_path), snapshot_frame)
-
-        # Build professional alert template
         loc_str = location_desc if location_desc else f"Dashcam Source ({source_name})"
         message = (
-            f"🚨 *MUNICIPAL ROAD HAZARD REPORT: POTHOLE DETECTED*\n"
+            f"🚨 *MUNICIPAL ROAD HAZARD: POTHOLE DETECTED*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 *Location/Route:* {loc_str}\n"
-            f"⚠️ *Hazard Severity:* *{detection.severity.upper()}*\n"
-            f"🎯 *Detection Confidence:* {detection.confidence * 100:.1f}%\n"
-            f"📐 *Relative Road Area:* {detection.area_ratio * 100:.2f}%\n"
+            f"📍 *Location/Source:* {loc_str}\n"
+            f"⚠️ *Severity:* *{detection.severity.upper()}*\n"
+            f"🎯 *Confidence:* {detection.confidence * 100:.1f}%\n"
             f"🆔 *Pothole Track ID:* #{track_id or 'N/A'}\n"
             f"🕒 *Detection Time:* {timestamp_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📸 _Annotated camera capture attached above._\n"
-            f"_Automated dispatch generated by AI Pothole Detection System._"
+            f"_Automated AI Pothole Alert_"
         )
 
         payload = {
             "phone": self.authority_phone,
             "message": message,
-            "image_path": str(snapshot_path),
         }
 
-        try:
-            resp = requests.post(f"{self.base_url}/send", json=payload, timeout=12.0)
-            if resp.status_code == 200 and resp.json().get("success"):
-                print(f"\n[WHATSAPP ALERT DISPATCHED] Pothole #{track_id} sent to authority ({self.authority_phone})")
-                return True
-            else:
-                err = resp.json().get("error") if resp.status_code != 200 else "Unknown error"
-                print(f"\n[WHATSAPP ALERT FAILED] {err}")
-                return False
-        except Exception as e:
-            print(f"\n[WHATSAPP ALERT ERROR] Failed to deliver alert: {e}")
-            return False
+        def _do_send():
+            try:
+                resp = requests.post(f"{self.base_url}/send", json=payload, timeout=5.0)
+                if resp.status_code == 200 and resp.json().get("success"):
+                    print(f"\n[WHATSAPP ALERT DISPATCHED] Pothole #{track_id or 'N/A'} sent to {self.authority_phone}")
+                else:
+                    err = resp.json().get("error") if resp.status_code == 200 else resp.text
+                    print(f"\n[WHATSAPP ALERT FAILED] {err}")
+            except Exception as e:
+                print(f"\n[WHATSAPP ALERT ERROR] Failed to deliver alert: {e}")
+
+        if async_dispatch:
+            thread = threading.Thread(target=_do_send, daemon=True)
+            thread.start()
+            return True
+        else:
+            _do_send()
+            return True
 
     def stop_service(self) -> None:
         """Terminate the microservice process cleanly."""

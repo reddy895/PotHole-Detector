@@ -62,32 +62,33 @@ python utils/download_weights.py
 PotHole/
 ├── config.py          # All system parameters (thresholds, paths, device)
 ├── detector.py        # YOLO inference engine + OpenCV annotation (core logic)
-├── main.py            # CLI entrypoint (webcam / image / video modes)
-├── app.py             # Flask web server (MJPEG stream + REST API)
+├── main.py            # CLI & interactive terminal entrypoint
+├── link_whatsapp.py   # WhatsApp Web authentication utility
+├── whatsapp_bot/      # WhatsApp bot microservice (Node.js)
 │
 ├── utils/
 │   ├── video_utils.py     # Stream I/O, terminal output, JSONL log writer
 │   ├── helpers.py         # Hardware info, base64 image encode/decode
 │   ├── logger.py          # Colour-coded structured logger
-│   └── download_weights.py # Auto-download model weights
-│
-├── templates/
-│   └── index.html     # Web UI (served by Flask)
+│   └── whatsapp_notifier.py # WhatsApp alert dispatcher
 │
 ├── models/            # YOLO .pt weight files (not tracked in git)
 └── outputs/           # Annotated images/videos (generated at runtime)
 ```
 
 **Key design rules:**
-- `detector.py` has **no** knowledge of Flask, CLI args, or file I/O. It only takes a numpy frame and returns a `DetectionResult`.
+- `detector.py` has **no** knowledge of CLI args or file I/O. It only takes a numpy frame and returns a `DetectionResult`.
 - `config.py` is the **single source of truth** for all defaults. Never hardcode paths or thresholds in other modules.
-- `app.py` and `main.py` are thin dispatchers — they validate inputs and call the core engine.
+- `main.py` is a thin dispatcher — it validates inputs and calls the core engine and OpenCV preview.
 
 ---
 
 ## Running the Application
 
 ```bash
+# Interactive mode (Webcam, Video, Image, WhatsApp setup)
+./run.sh
+
 # CLI — Image
 python main.py --source image --input road.jpg
 
@@ -96,17 +97,6 @@ python main.py --source video --input road.mp4 --save-log --skip-frames 1
 
 # CLI — Webcam
 python main.py --source webcam
-
-# Web UI
-bash run_web.sh
-# or: python app.py
-# then open http://localhost:5000
-
-# Query the REST API
-curl http://localhost:5000/api/system
-curl -X POST http://localhost:5000/api/conf \
-     -H "Content-Type: application/json" \
-     -d '{"threshold": 0.45}'
 ```
 
 ---

@@ -24,8 +24,9 @@ class Config:
     GPU_IMAGE_SIZE: int = int(os.getenv("POTHOLE_GPU_IMG_SIZE", "640"))
 
 
-    # Target processing & playback FPS for video mode (e.g. 12-13 FPS for comfortable human preview).
-    TARGET_VIDEO_FPS: float = float(os.getenv("POTHOLE_TARGET_FPS", "12.5"))
+    # Target processing & playback FPS for video mode (0 = unthrottled maximum speed).
+    TARGET_VIDEO_FPS: float = float(os.getenv("POTHOLE_TARGET_FPS", "0"))
+    DEFAULT_SKIP_FRAMES: int = int(os.getenv("POTHOLE_SKIP_FRAMES", "1"))
 
 
     # Hardware device selection (GPU if CUDA is available, otherwise fallback to CPU)
@@ -95,11 +96,11 @@ class Config:
     WINDOW_TITLE: str = "AI Pothole Detection System (Press Q to quit)"
 
     # WhatsApp Automated Municipal Alert System
-    WHATSAPP_ENABLED: bool = os.getenv("POTHOLE_WHATSAPP_ENABLED", "0").lower() in ("1", "true", "yes")
-    WHATSAPP_AUTHORITY_PHONE: str = os.getenv("POTHOLE_AUTHORITY_PHONE", "")
+    WHATSAPP_ENABLED: bool = os.getenv("POTHOLE_WHATSAPP_ENABLED", "1").lower() in ("1", "true", "yes")
+    WHATSAPP_AUTHORITY_PHONE: str = os.getenv("POTHOLE_AUTHORITY_PHONE", "+919591152862")
     WHATSAPP_PORT: int = int(os.getenv("POTHOLE_WHATSAPP_PORT", "5005"))
-    WHATSAPP_MIN_SEVERITY: str = os.getenv("POTHOLE_WHATSAPP_MIN_SEVERITY", "Medium")
-    WHATSAPP_COOLDOWN_SECONDS: float = float(os.getenv("POTHOLE_WHATSAPP_COOLDOWN", "30.0"))
+    WHATSAPP_MIN_SEVERITY: str = os.getenv("POTHOLE_WHATSAPP_MIN_SEVERITY", "Low")
+    WHATSAPP_COOLDOWN_SECONDS: float = float(os.getenv("POTHOLE_WHATSAPP_COOLDOWN", "15.0"))
 
 
     def __init__(self):

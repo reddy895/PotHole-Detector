@@ -1,6 +1,6 @@
 # AI-Powered Pothole Detection System
 
-A high-performance, real-time computer vision application built with **Python**, **Ultralytics YOLO**, and **OpenCV** to detect and highlight road potholes from live webcams, images, and recorded road videos — available as both a **terminal CLI** and a **Flask web interface**.
+A high-performance, real-time computer vision application built with **Python**, **Ultralytics YOLO**, and **OpenCV** to detect and highlight road potholes from live webcams, images, and recorded road videos — featuring interactive terminal navigation, live OpenCV visualization, and automated municipal WhatsApp alerts.
 
 ---
 
@@ -18,7 +18,20 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
 ### 2. Run the Application
 
-#### 📷 Webcam Mode (Real-Time Live Detection)
+#### 🖥️ Interactive Terminal Launcher (Recommended)
+Simply launch the launcher:
+```bash
+./run.sh
+# or:
+python main.py
+```
+This opens an interactive menu where you can choose:
+1. **Live Webcam** — Real-time camera detection in OpenCV
+2. **Video File** — Select video with live OpenCV tracking playback
+3. **Image File** — Browse image with instant live OpenCV preview
+4. **WhatsApp Alerting** — Automatically dispatches hazard alerts to authorities
+
+#### 📷 Webcam Mode (Direct CLI)
 ```bash
 python main.py --source webcam
 ```
@@ -38,48 +51,21 @@ python main.py --source video --input road.mp4
 
 ---
 
-## 🌐 Web Interface (Flask)
-
-Run the browser-based dashboard for live webcam detection or video upload:
-
-```bash
-bash run_web.sh
-# or manually:
-python app.py
-```
-
-Then open **http://localhost:5000** in your browser.
-
-- **Live Webcam** — real-time MJPEG stream with annotated detections
-- **Video Upload** — upload a `.mp4` file and watch frame-by-frame inference streamed back
-
----
-
 ## 📁 Project Structure
 
 ```
 PotHole/
-├── main.py              # CLI entrypoint (webcam / image / video)
-├── app.py               # Flask web application (MJPEG streams)
-├── detector.py          # YOLO inference engine & OpenCV rendering
+├── main.py              # CLI & interactive terminal entrypoint
+├── detector.py          # YOLO inference engine & OpenCV annotation
 ├── config.py            # Centralized configuration & device selector
 ├── requirements.txt     # Python dependencies
-├── run.sh               # Quick-launch script for CLI mode
-├── run_web.sh           # Quick-launch script for web mode
+├── run.sh               # Quick-launch script for terminal
+├── link_whatsapp.py     # Utility to link WhatsApp via QR code
+├── whatsapp_bot/        # WhatsApp Web microservice (Node.js)
 ├── README.md            # Documentation
-│
 ├── models/
-│   └── pothole.pt       # Trained YOLO weights (download separately)
-│
-├── templates/
-│   └── index.html       # Flask web UI template
-│
-├── outputs/             # Annotated images/videos (generated at runtime)
-│
-├── utils/
-│   ├── __init__.py
-│   └── video_utils.py   # Stream I/O and terminal telemetry
-│
+│   └── pothole.pt       # Trained YOLO weights
+├── outputs/             # Annotated images, videos & WhatsApp alert logs
 └── road.jpg             # Sample road image for instant testing
 ```
 
