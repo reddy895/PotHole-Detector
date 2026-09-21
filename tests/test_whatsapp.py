@@ -1,5 +1,4 @@
 """Unit tests for WhatsApp notifier configuration, throttling, and state."""
-import pytest
 from utils.whatsapp_notifier import WhatsAppNotifier
 
 

@@ -8,7 +8,6 @@ from pathlib import Path
 import subprocess
 import threading
 import time
-import cv2
 import numpy as np
 import requests
 

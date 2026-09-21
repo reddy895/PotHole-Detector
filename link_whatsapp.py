@@ -5,7 +5,6 @@ Run this script to scan the WhatsApp Web QR code and link your phone:
     python link_whatsapp.py
 """
 import sys
-import time
 from pathlib import Path
 
 # Ensure project root is on sys.path

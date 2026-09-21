@@ -1,13 +1,12 @@
 """Core YOLO inference and annotation engine for pothole detection."""
 from typing import List, Optional, Tuple, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import threading
 import queue
 import time
 import cv2
 import numpy as np
-import torch
 from ultralytics import YOLO
 
 from config import config

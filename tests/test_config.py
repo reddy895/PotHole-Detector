@@ -1,7 +1,4 @@
-"""Unit tests for configuration management."""
-import os
-import pytest
-from config import config, Config
+from config import config
 
 
 def test_config_defaults():

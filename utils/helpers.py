@@ -1,7 +1,6 @@
 """Helper functions for hardware telemetry, image transformations, and time formatting."""
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import base64
-import time
 from datetime import datetime
 import cv2
 import numpy as np

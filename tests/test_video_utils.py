@@ -2,10 +2,8 @@
 import tempfile
 from pathlib import Path
 import json
-import pytest
 from detector import PotholeDetection, DetectionResult
 from utils.video_utils import (
-    print_banner,
     print_progress_bar,
     print_final_summary,
     save_detection_log,

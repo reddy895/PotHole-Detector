@@ -10,7 +10,6 @@ from pathlib import Path
 import time
 
 import cv2
-import numpy as np
 
 # Ensure current directory is on sys.path
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,13 +19,11 @@ if str(BASE_DIR) not in sys.path:
 from config import config
 from detector import (
     PotholeDetector,
-    DetectionResult,
     ThreadedInferencePipeline,
     PotholeTracker,
 )
 from utils.video_utils import (
     print_banner,
-    print_detection_status,
     print_progress_bar,
     print_webcam_status,
     print_final_summary,

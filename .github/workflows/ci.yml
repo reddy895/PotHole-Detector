@@ -36,7 +36,6 @@ jobs:
           python -m py_compile config.py
           python -m py_compile detector.py
           python -m py_compile main.py
-          python -m py_compile app.py
           python -m py_compile utils/video_utils.py
           python -m py_compile utils/helpers.py
           python -m py_compile utils/logger.py
@@ -64,7 +63,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install opencv-python-headless numpy pillow flask pytest
+          pip install ultralytics opencv-python-headless numpy pillow pytest requests
 
       - name: Run Pytest Suite
         run: |
@@ -76,7 +75,8 @@ jobs:
           from config import config
           assert config.CONFIDENCE_THRESHOLD == 0.35
           assert config.IOU_THRESHOLD == 0.45
-          assert config.IMAGE_SIZE == 640
+          assert config.IMAGE_SIZE in (0, 640)
+          assert config.get_image_size() in (320, 416, 640)
           device = config.get_device()
           assert device in ("cuda", "cpu")
           print(f"[OK] Config loaded. Device: {device}")
