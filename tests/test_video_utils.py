@@ -1,11 +1,12 @@
 """Unit tests for video utilities, reporting, and event logging."""
+import json
 import tempfile
 from pathlib import Path
-import json
-from detector import PotholeDetection, DetectionResult
+
+from detector import DetectionResult, PotholeDetection
 from utils.video_utils import (
-    print_progress_bar,
     print_final_summary,
+    print_progress_bar,
     save_detection_log,
 )
 

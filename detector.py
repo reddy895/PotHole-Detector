@@ -1,15 +1,27 @@
 """Core YOLO inference and annotation engine for pothole detection."""
-from typing import List, Optional, Tuple, Callable
+import queue
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-import threading
-import queue
-import time
+from typing import Callable, List, Optional, Tuple
+
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
 from config import config
+from utils.ui_composer import (
+    calculate_pothole_areas,
+    combine_views,
+    create_thumbnail_sidebar,
+)
+
+__all__ = [
+    "calculate_pothole_areas",
+    "combine_views",
+    "create_thumbnail_sidebar",
+]
 
 
 @dataclass
@@ -171,7 +183,7 @@ class PotholeDetector:
             self.model = YOLO(str(self.model_path))
             self.model.to(self.device)
         except Exception as e:
-            raise RuntimeError(f"Failed to load YOLO model from '{self.model_path}': {e}")
+            raise RuntimeError(f"Failed to load YOLO model from '{self.model_path}': {e}") from e
 
     def register_alert_handler(self, handler: Callable[[DetectionResult, np.ndarray], None]) -> None:
         """Register a callback triggered on every frame that has detections.
@@ -236,7 +248,7 @@ class PotholeDetector:
                 confs = boxes.conf.cpu().numpy()
                 cls_ids = boxes.cls.cpu().numpy().astype(int)
 
-                for box, score, class_id in zip(xyxy, confs, cls_ids):
+                for box, score, class_id in zip(xyxy, confs, cls_ids, strict=False):
                     x1, y1, x2, y2 = [int(v) for v in box]
                     # Clamp coordinates to valid frame bounds
                     x1 = max(0, min(x1, frame_width - 1))
@@ -294,6 +306,7 @@ class PotholeDetector:
         total_count: Optional[int] = None,
         override_fps: Optional[float] = None,
         whatsapp_msg: Optional[str] = None,
+        critical_id: Optional[int] = None,
     ) -> np.ndarray:
         """Draw bounding boxes, severity labels, corner accents, and HUD overlay.
 
@@ -303,6 +316,10 @@ class PotholeDetector:
             show_hud: Render the count/FPS status bar in the top corners.
             total_count: Cumulative unique potholes detected across video stream.
             override_fps: Optional custom FPS to display on HUD.
+            whatsapp_msg: Optional WhatsApp alert text to display on-screen.
+            critical_id: Optional track_id of the pothole to render in
+                "CRITICAL / LARGEST" style (thick red border + warning label).
+                Supplied by :class:`~utils.ui_composer.CriticalPotholeTracker`.
 
         Returns:
             Annotated copy of the input frame (does not modify in-place).
@@ -318,55 +335,137 @@ class PotholeDetector:
             "Unknown": (20, 120, 255),  # default blue
         }
 
+        # Pulsing flag for the critical pothole (alternates every ~0.4 s)
+        _pulse_on = (int(time.time() * 2.5) % 2) == 0
+
         for det in result.detections:
             x1, y1, x2, y2 = det.x1, det.y1, det.x2, det.y2
-            box_color = _SEVERITY_COLORS.get(det.severity, config.BOX_COLOR)
-
-            # Main bounding box
-            cv2.rectangle(
-                annotated, (x1, y1), (x2, y2),
-                box_color, config.BOX_THICKNESS, cv2.LINE_AA,
+            is_critical = (
+                critical_id is not None
+                and det.track_id is not None
+                and det.track_id == critical_id
             )
 
-            # High-visibility corner accents
-            corner_len = min(18, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
-            accent_c = config.CORNER_ACCENT_COLOR
-            accent_t = config.BOX_THICKNESS + 1
-            cv2.line(annotated, (x1, y1), (x1 + corner_len, y1), accent_c, accent_t, cv2.LINE_AA)
-            cv2.line(annotated, (x1, y1), (x1, y1 + corner_len), accent_c, accent_t, cv2.LINE_AA)
-            cv2.line(annotated, (x2, y1), (x2 - corner_len, y1), accent_c, accent_t, cv2.LINE_AA)
-            cv2.line(annotated, (x2, y1), (x2, y1 + corner_len), accent_c, accent_t, cv2.LINE_AA)
-            cv2.line(annotated, (x1, y2), (x1 + corner_len, y2), accent_c, accent_t, cv2.LINE_AA)
-            cv2.line(annotated, (x1, y2), (x1, y2 - corner_len), accent_c, accent_t, cv2.LINE_AA)
-            cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), accent_c, accent_t, cv2.LINE_AA)
-            cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), accent_c, accent_t, cv2.LINE_AA)
+            if is_critical:
+                # ---- Critical pothole: thick double-border red styling ----
+                CRIT_OUTER = (0, 0, 200)    # deep red outer rect
+                CRIT_INNER = (20, 20, 255)  # bright red inner rect
+                CRIT_ACCENT = (0, 0, 255)   # corner accent color
+                outer_thick = 5
+                inner_thick = 2
+                inner_offset = outer_thick + 1
 
-            # Label badge: e.g. "#1 Pothole 87% [High]"
-            track_prefix = f"#{det.track_id} " if det.track_id is not None else ""
-            label = f"{track_prefix}{det.label} [{det.severity}]"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.60
-            font_thickness = 2
-            (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+                # Outer rect (always on)
+                cv2.rectangle(
+                    annotated, (x1, y1), (x2, y2),
+                    CRIT_OUTER, outer_thick, cv2.LINE_AA,
+                )
+                # Inner rect (pulsing)
+                if _pulse_on:
+                    ix1 = max(0, x1 + inner_offset)
+                    iy1 = max(0, y1 + inner_offset)
+                    ix2 = min(width - 1, x2 - inner_offset)
+                    iy2 = min(height - 1, y2 - inner_offset)
+                    if ix2 > ix1 and iy2 > iy1:
+                        cv2.rectangle(
+                            annotated, (ix1, iy1), (ix2, iy2),
+                            CRIT_INNER, inner_thick, cv2.LINE_AA,
+                        )
 
-            pad_x, pad_y = 6, 5
-            if y1 - (text_h + pad_y * 2) > 0:
-                badge_y1 = y1 - (text_h + pad_y * 2)
-                badge_y2 = y1
-                text_y = y1 - pad_y
+                # Critical corner accents (longer, thicker)
+                corner_len = min(28, max(10, int(min(x2 - x1, y2 - y1) * 0.25)))
+                accent_t = outer_thick + 1
+                cv2.line(annotated, (x1, y1), (x1 + corner_len, y1), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x1, y1), (x1, y1 + corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y1), (x2 - corner_len, y1), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y1), (x2, y1 + corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x1, y2), (x1 + corner_len, y2), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x1, y2), (x1, y2 - corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+
+                # Critical label with area stats
+                det_w = det.x2 - det.x1
+                det_h = det.y2 - det.y1
+                area_k = det.area / 1000.0
+                track_prefix = f"#{det.track_id} " if det.track_id is not None else ""
+                label = f"\u26a0 CRITICAL / LARGEST  {det_w}x{det_h}px  Area:{area_k:.1f}k"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.58
+                font_thickness = 2
+                (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+
+                pad_x, pad_y = 8, 6
+                if y1 - (text_h + pad_y * 2 + 2) > 0:
+                    badge_y1 = y1 - (text_h + pad_y * 2 + 2)
+                    badge_y2 = y1
+                    text_y = y1 - pad_y - 1
+                else:
+                    badge_y1 = y2
+                    badge_y2 = y2 + (text_h + pad_y * 2 + 2)
+                    text_y = y2 + text_h + pad_y + 1
+
+                badge_x1 = max(0, x1)
+                badge_x2 = min(width - 1, x1 + text_w + pad_x * 2)
+
+                # Badge background: deep red, with optional pulsing brightness
+                badge_bg = (0, 0, 180) if _pulse_on else (0, 0, 140)
+                cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), badge_bg, -1)
+                # thin highlight border on badge
+                cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), CRIT_INNER, 1)
+                cv2.putText(
+                    annotated, label, (badge_x1 + pad_x, text_y),
+                    font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA,
+                )
+
             else:
-                badge_y1 = y1
-                badge_y2 = y1 + (text_h + pad_y * 2)
-                text_y = y1 + text_h + pad_y
+                # ---- Normal pothole: existing severity-colour styling ----
+                box_color = _SEVERITY_COLORS.get(det.severity, config.BOX_COLOR)
 
-            badge_x1 = x1
-            badge_x2 = min(width - 1, x1 + text_w + pad_x * 2)
+                cv2.rectangle(
+                    annotated, (x1, y1), (x2, y2),
+                    box_color, config.BOX_THICKNESS, cv2.LINE_AA,
+                )
 
-            cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), box_color, -1)
-            cv2.putText(
-                annotated, label, (badge_x1 + pad_x, text_y),
-                font, font_scale, config.LABEL_TEXT_COLOR, font_thickness, cv2.LINE_AA,
-            )
+                # High-visibility corner accents
+                corner_len = min(18, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
+                accent_c = config.CORNER_ACCENT_COLOR
+                accent_t = config.BOX_THICKNESS + 1
+                cv2.line(annotated, (x1, y1), (x1 + corner_len, y1), accent_c, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x1, y1), (x1, y1 + corner_len), accent_c, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y1), (x2 - corner_len, y1), accent_c, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y1), (x2, y1 + corner_len), accent_c, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x1, y2), (x1 + corner_len, y2), accent_c, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x1, y2), (x1, y2 - corner_len), accent_c, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), accent_c, accent_t, cv2.LINE_AA)
+                cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), accent_c, accent_t, cv2.LINE_AA)
+
+                # Label badge: e.g. "#1 Pothole 87% [High]"
+                track_prefix = f"#{det.track_id} " if det.track_id is not None else ""
+                label = f"{track_prefix}{det.label} [{det.severity}]"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.60
+                font_thickness = 2
+                (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+
+                pad_x, pad_y = 6, 5
+                if y1 - (text_h + pad_y * 2) > 0:
+                    badge_y1 = y1 - (text_h + pad_y * 2)
+                    badge_y2 = y1
+                    text_y = y1 - pad_y
+                else:
+                    badge_y1 = y1
+                    badge_y2 = y1 + (text_h + pad_y * 2)
+                    text_y = y1 + text_h + pad_y
+
+                badge_x1 = x1
+                badge_x2 = min(width - 1, x1 + text_w + pad_x * 2)
+
+                cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), box_color, -1)
+                cv2.putText(
+                    annotated, label, (badge_x1 + pad_x, text_y),
+                    font, font_scale, config.LABEL_TEXT_COLOR, font_thickness, cv2.LINE_AA,
+                )
 
         # HUD overlay
         if show_hud:

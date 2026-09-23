@@ -30,11 +30,14 @@ function cleanSingletonLocks(dir) {
         for (const file of files) {
             const fullPath = path.join(dir, file);
             try {
-                if (fs.statSync(fullPath).isDirectory()) {
-                    cleanSingletonLocks(fullPath);
-                } else if (file.startsWith('Singleton')) {
+                if (file.startsWith('Singleton')) {
                     fs.unlinkSync(fullPath);
                     console.log(`[WHATSAPP BOT] Cleaned lock file: ${fullPath}`);
+                } else {
+                    const stat = fs.lstatSync(fullPath);
+                    if (stat.isDirectory()) {
+                        cleanSingletonLocks(fullPath);
+                    }
                 }
             } catch (e) {}
         }
@@ -54,7 +57,7 @@ const client = new Client({
         dataPath: AUTH_DIR,
     }),
     puppeteer: {
-        headless: true,
+        headless: 'new',
         executablePath: CHROME_PATH,
         args: [
             '--no-sandbox',

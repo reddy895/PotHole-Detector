@@ -3,11 +3,12 @@
 Handles starting the Node.js WhatsApp microservice, monitoring authentication,
 and automatically dispatching road hazard alerts with image snapshots to authorities.
 """
-from typing import Optional, Dict, Any, Set
-from pathlib import Path
 import subprocess
 import threading
 import time
+from pathlib import Path
+from typing import Any, Dict, Optional, Set
+
 import numpy as np
 import requests
 
@@ -24,8 +25,8 @@ class WhatsAppNotifier:
         self,
         authority_phone: Optional[str] = None,
         enabled: bool = False,
-        min_severity: str = "Medium",
-        cooldown_seconds: float = 25.0,
+        min_severity: str = "Low",
+        cooldown_seconds: float = 10.0,
         port: int = 5005,
     ) -> None:
         self.enabled = enabled

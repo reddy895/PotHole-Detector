@@ -5,35 +5,29 @@ Main application entry point supporting Webcam, Image, and Video detection modes
 """
 import argparse
 import sys
-from typing import Optional
-from pathlib import Path
 import time
+from pathlib import Path
+from typing import Optional
 
 import cv2
-
-# Ensure current directory is on sys.path
-BASE_DIR = Path(__file__).resolve().parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
 
 from config import config
 from detector import (
     PotholeDetector,
-    ThreadedInferencePipeline,
     PotholeTracker,
+    ThreadedInferencePipeline,
 )
+from utils.ui_composer import CriticalPotholeTracker, ThumbnailSidebarManager, combine_views
 from utils.video_utils import (
+    create_video_writer,
     print_banner,
+    print_final_summary,
     print_progress_bar,
     print_webcam_status,
-    print_final_summary,
     save_annotated_image,
-    create_video_writer,
     save_detection_log,
 )
 from utils.whatsapp_notifier import WhatsAppNotifier
-
-
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -236,9 +230,13 @@ def run_video_mode(
     total_potholes_found = 0
     fps_history = []
     tracker = PotholeTracker(min_hits=min(3, max(1, total_frames // 15)))
+    critical_tracker = CriticalPotholeTracker(hysteresis_margin=0.10)
+    sidebar_mgr = ThumbnailSidebarManager(maxlen=5, main_view_ratio=0.72)
     last_result = None
     last_whatsapp_msg = None
     last_whatsapp_time = 0.0
+
+    annotated_frame = None
 
     if not no_view:
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
@@ -272,6 +270,10 @@ def run_video_mode(
                     tracker.update(result.detections, width, height)
                     last_result = result
 
+                # Update critical pothole tracker and thumbnail sidebar
+                critical_id = critical_tracker.update(result.detections)
+                sidebar_mgr.push_detections(frame, result.detections, frame_idx)
+
                 total_potholes_found += result.count
 
                 work_duration = time.perf_counter() - loop_start
@@ -285,7 +287,7 @@ def run_video_mode(
                     for det in result.detections:
                         sent = notifier.send_pothole_alert(
                             detection=det,
-                            frame=annotated_frame if 'annotated_frame' in locals() else frame,
+                            frame=annotated_frame if annotated_frame is not None else frame,
                             source_name=video_path.name,
                             async_dispatch=True,
                         )
@@ -294,7 +296,7 @@ def run_video_mode(
                             last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.severity}]"
                             last_whatsapp_time = time.time()
                             print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.severity}] ({det.confidence*100:.1f}%)")
-                        break
+                            break
 
                 active_wa_msg = last_whatsapp_msg if (time.time() - last_whatsapp_time) < 4.0 else None
 
@@ -305,8 +307,17 @@ def run_video_mode(
                     total_count=tracker.unique_count,
                     override_fps=current_fps,
                     whatsapp_msg=active_wa_msg,
+                    critical_id=critical_id,
                 )
+                # Save clean annotated frame (original resolution, no sidebar)
                 writer.write(annotated_frame)
+
+                # Build composite display: 70% main + 30% sidebar
+                frame_h, frame_w = annotated_frame.shape[:2]
+                # sidebar_mgr.main_view_ratio=0.72 → sidebar is ~28% of total width
+                sidebar_w = max(160, int(frame_w * (1.0 - sidebar_mgr.main_view_ratio) / sidebar_mgr.main_view_ratio))
+                sidebar = sidebar_mgr.render_sidebar(sidebar_w, frame_h)
+                display_frame = combine_views(annotated_frame, sidebar)
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
@@ -320,7 +331,7 @@ def run_video_mode(
                 )
 
                 if not no_view:
-                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
+                    cv2.imshow(config.WINDOW_TITLE, display_frame)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
@@ -394,9 +405,12 @@ def run_webcam_mode(
     total_potholes_found = 0
     fps_history = []
     tracker = PotholeTracker(min_hits=3)
+    critical_tracker = CriticalPotholeTracker(hysteresis_margin=0.10)
+    sidebar_mgr = ThumbnailSidebarManager(maxlen=5, main_view_ratio=0.72)
     last_result = None
     last_whatsapp_msg = None
     last_whatsapp_time = 0.0
+    annotated_frame = None
 
     if not no_view:
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
@@ -415,17 +429,21 @@ def run_webcam_mode(
                 frame_idx += 1
                 h, w = frame.shape[:2]
 
-                # Feed every Nth frame to inference thread; reuse last result otherwise
+                # Frame-skip: feed only every Nth frame to the inference thread
                 if skip_frames == 0 or frame_idx % (skip_frames + 1) == 1:
                     pipe.put(frame)
 
-                result = pipe.get(timeout=0.04)
+                result = pipe.get(timeout=0.05)
                 if result is None:
-                    result = detector.detect(frame)  # fallback for very first frame
+                    result = detector.detect(frame)
 
                 if result is not last_result:
                     tracker.update(result.detections, w, h)
                     last_result = result
+
+                # Update critical pothole tracker and thumbnail sidebar
+                critical_id = critical_tracker.update(result.detections)
+                sidebar_mgr.push_detections(frame, result.detections, frame_idx)
 
                 total_potholes_found += result.count
 
@@ -440,7 +458,7 @@ def run_webcam_mode(
                     for det in result.detections:
                         sent = notifier.send_pothole_alert(
                             detection=det,
-                            frame=annotated_frame if 'annotated_frame' in locals() else frame,
+                            frame=annotated_frame if annotated_frame is not None else frame,
                             source_name=f"webcam:{cam_idx}",
                             async_dispatch=True,
                         )
@@ -449,7 +467,7 @@ def run_webcam_mode(
                             last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.severity}]"
                             last_whatsapp_time = time.time()
                             print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.severity}] ({det.confidence*100:.1f}%)")
-                        break
+                            break
 
                 active_wa_msg = last_whatsapp_msg if (time.time() - last_whatsapp_time) < 4.0 else None
 
@@ -460,7 +478,15 @@ def run_webcam_mode(
                     total_count=tracker.unique_count,
                     override_fps=current_fps,
                     whatsapp_msg=active_wa_msg,
+                    critical_id=critical_id,
                 )
+
+                # Build composite display: 70% main + 30% sidebar
+                frame_h, frame_w = annotated_frame.shape[:2]
+                # sidebar_mgr.main_view_ratio=0.72 → sidebar is ~28% of total width
+                sidebar_w = max(160, int(frame_w * (1.0 - sidebar_mgr.main_view_ratio) / sidebar_mgr.main_view_ratio))
+                sidebar = sidebar_mgr.render_sidebar(sidebar_w, frame_h)
+                display_frame = combine_views(annotated_frame, sidebar)
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
@@ -474,7 +500,7 @@ def run_webcam_mode(
                 )
 
                 if not no_view:
-                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
+                    cv2.imshow(config.WINDOW_TITLE, display_frame)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
@@ -511,9 +537,9 @@ def run_webcam_mode(
 def _pick_file_dialog(file_type: str = "video") -> str | None:
     """Open a native file picker dialog and return selected path (or None)."""
     try:
+        import os
         import tkinter as tk
         from tkinter import filedialog
-        import os
         root = tk.Tk()
         root.withdraw()          # hide the blank root window
         root.attributes("-topmost", True)

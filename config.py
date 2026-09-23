@@ -1,6 +1,6 @@
 """Configuration module for the Terminal-Based AI Pothole Detection System."""
-from pathlib import Path
 import os
+from pathlib import Path
 
 
 class Config:

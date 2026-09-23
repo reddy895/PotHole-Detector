@@ -1,5 +1,6 @@
 """Unit tests for PotholeDetection, severity heuristics, and PotholeTracker."""
 import pytest
+
 from detector import PotholeDetection, PotholeTracker
 
 

@@ -3,17 +3,9 @@
 Run directly:
     python utils/download_weights.py
 """
-from pathlib import Path
 import sys
-
-# Ensure project root is in sys.path
-BASE_DIR = Path(__file__).resolve().parent.parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
-
-from config import config
-from utils.logger import logger
-
+from pathlib import Path
+from typing import Optional
 
 # Public Roboflow-hosted pothole YOLO weights (YOLOv8n trained on pothole dataset)
 _PRETRAINED_URL = (
@@ -21,7 +13,7 @@ _PRETRAINED_URL = (
 )
 
 
-def ensure_model_weights(target_path: Path = None) -> Path:
+def ensure_model_weights(target_path: Optional[Path] = None) -> Path:
     """Ensure that a valid YOLO pothole weights file exists on disk.
 
     If the weights are not found at *target_path*, falls back to downloading
@@ -38,6 +30,9 @@ def ensure_model_weights(target_path: Path = None) -> Path:
     Raises:
         RuntimeError: If no weights can be found or downloaded.
     """
+    from config import config
+    from utils.logger import logger
+
     if target_path is None:
         target_path = config.MODEL_PATH
 
@@ -114,5 +109,9 @@ def ensure_model_weights(target_path: Path = None) -> Path:
 
 
 if __name__ == "__main__":
+    _BASE_DIR = Path(__file__).resolve().parent.parent
+    if str(_BASE_DIR) not in sys.path:
+        sys.path.insert(0, str(_BASE_DIR))
+
     resolved = ensure_model_weights()
     print(f"[OK] Model weights ready at: {resolved}")

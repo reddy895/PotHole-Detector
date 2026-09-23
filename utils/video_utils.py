@@ -1,17 +1,12 @@
 """Helper utilities for video streams, terminal reporting, file I/O, and detection logging."""
-from typing import Optional, Tuple
-from pathlib import Path
 import json
 import sys
 import time
+from pathlib import Path
+from typing import Optional, Tuple
+
 import cv2
 import numpy as np
-
-# Ensure project root is on sys.path so `config` can be found when this
-# module is imported standalone or as part of the `utils` package.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from config import config
 
@@ -57,13 +52,13 @@ def print_detection_status(
 
     if count > 0:
         conf_pct = highest_confidence * 100
-        print(f"[POTHOLE DETECTED]")
+        print("[POTHOLE DETECTED]")
         print(f"Count: {count}")
         print(f"Highest Confidence: {conf_pct:.1f}%")
         print(f"FPS: {fps:.1f}")
         print("-" * 25)
     else:
-        print(f"[NO POTHOLE]")
+        print("[NO POTHOLE]")
         print(f"FPS: {fps:.1f}")
         print("-" * 25)
 
@@ -169,7 +164,7 @@ def print_final_summary(
         print(f"  Total Potholes Detected:   {unique_potholes} unique pothole(s)")
         print(f"  Total Detection Events:    {total_instances} frame instances")
     else:
-        print(f"  Total Potholes Detected:   0 potholes")
+        print("  Total Potholes Detected:   0 potholes")
     print(f"  Highest Confidence:        {conf_str}")
     print(f"  Average FPS:               {avg_fps:.1f}")
     if output_path:

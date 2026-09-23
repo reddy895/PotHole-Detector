@@ -1,7 +1,6 @@
 # ruff configuration for AI Pothole Detection System
 # https://docs.astral.sh/ruff/configuration/
 
-[tool.ruff]
 target-version = "py310"
 line-length = 100
 
@@ -15,7 +14,7 @@ exclude = [
     ".github",
 ]
 
-[tool.ruff.lint]
+[lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -27,8 +26,11 @@ select = [
 ignore = [
     "E501",  # line too long — not enforced
     "B008",  # do not perform function calls in default arguments
-    "UP007", # use X | Y instead of Optional[X] — keep explicit Optional for clarity
+    "UP006", # use dict/list instead of Dict/List — keep explicit typing for clarity
+    "UP007", # use X | Y instead of Union[X, Y]
+    "UP035", # typing.Dict/Set deprecated — keep explicit typing for clarity
+    "UP045", # use X | None instead of Optional[X] — keep explicit Optional for clarity (Ruff 0.6+ split of UP007)
 ]
 
-[tool.ruff.lint.isort]
+[lint.isort]
 known-first-party = ["config", "detector", "utils"]
