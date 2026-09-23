@@ -384,22 +384,59 @@ class PotholeDetector:
                 cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), CRIT_ACCENT, accent_t, cv2.LINE_AA)
                 cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
 
+                # ---- Map-pin marker drawn above the bounding box centre ----
+                # pin_cx is the horizontal centre of the box; pin touches the top edge
+                pin_cx = (x1 + x2) // 2
+                pin_r = 14          # radius of the circular pin head
+                pin_stem = 16       # length of the stem below the circle
+                # keep the whole pin on-screen
+                pin_head_cy = max(pin_r + 2, y1 - pin_stem - pin_r)
+                pin_tip_y   = min(height - 1, pin_head_cy + pin_r + pin_stem)
+
+                # White halo so the pin is visible on any background
+                cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r + 3,
+                           (255, 255, 255), -1, cv2.LINE_AA)
+                # Pulsing fill: brighter red when pulse is on
+                pin_fill = (0, 0, 230) if _pulse_on else (0, 0, 180)
+                cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r,
+                           pin_fill, -1, cv2.LINE_AA)
+                # Dark hole in centre (pin eye)
+                cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r // 3,
+                           (20, 20, 20), -1, cv2.LINE_AA)
+                # Stem: white border line then coloured line
+                cv2.line(annotated,
+                         (pin_cx, pin_head_cy + pin_r),
+                         (pin_cx, pin_tip_y),
+                         (255, 255, 255), 5, cv2.LINE_AA)
+                cv2.line(annotated,
+                         (pin_cx, pin_head_cy + pin_r),
+                         (pin_cx, pin_tip_y),
+                         pin_fill, 3, cv2.LINE_AA)
+                # Teardrop tip (small filled triangle at the bottom of the stem)
+                tip_pts = np.array([
+                    [pin_cx - 5, pin_tip_y - 4],
+                    [pin_cx + 5, pin_tip_y - 4],
+                    [pin_cx,     pin_tip_y + 4],
+                ], dtype=np.int32)
+                cv2.fillPoly(annotated, [tip_pts], pin_fill, cv2.LINE_AA)
+
                 # Critical label with area stats
                 det_w = det.x2 - det.x1
                 det_h = det.y2 - det.y1
                 area_k = det.area / 1000.0
-                track_prefix = f"#{det.track_id} " if det.track_id is not None else ""
-                label = f"\u26a0 CRITICAL / LARGEST  {det_w}x{det_h}px  Area:{area_k:.1f}k"
+                label = f"! CRITICAL / LARGEST  {det_w}x{det_h}px  Area:{area_k:.1f}k"
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 font_scale = 0.58
                 font_thickness = 2
                 (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
 
                 pad_x, pad_y = 8, 6
-                if y1 - (text_h + pad_y * 2 + 2) > 0:
-                    badge_y1 = y1 - (text_h + pad_y * 2 + 2)
-                    badge_y2 = y1
-                    text_y = y1 - pad_y - 1
+                # Place badge below the pin head so it doesn't overlap
+                badge_ref_y = max(pin_head_cy + pin_r + pin_stem, y1)
+                if badge_ref_y - (text_h + pad_y * 2 + 2) > 0:
+                    badge_y1 = badge_ref_y - (text_h + pad_y * 2 + 2)
+                    badge_y2 = badge_ref_y
+                    text_y = badge_ref_y - pad_y - 1
                 else:
                     badge_y1 = y2
                     badge_y2 = y2 + (text_h + pad_y * 2 + 2)
@@ -417,6 +454,7 @@ class PotholeDetector:
                     annotated, label, (badge_x1 + pad_x, text_y),
                     font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA,
                 )
+
 
             else:
                 # ---- Normal pothole: existing severity-colour styling ----

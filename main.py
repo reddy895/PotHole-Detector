@@ -17,7 +17,7 @@ from detector import (
     PotholeTracker,
     ThreadedInferencePipeline,
 )
-from utils.ui_composer import CriticalPotholeTracker, ThumbnailSidebarManager, combine_views
+from utils.ui_composer import CriticalPotholeTracker
 from utils.video_utils import (
     create_video_writer,
     print_banner,
@@ -170,12 +170,14 @@ def run_image_mode(
 
     if not no_view:
         window_title = f"{config.WINDOW_TITLE} - {image_path.name}"
+        ih, iw = annotated_frame.shape[:2]
         cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        cv2.resizeWindow(window_title, iw, ih)
         cv2.imshow(window_title, annotated_frame)
-        print("\nDisplaying image preview (Full Screen). Press any key to exit...")
+        print("\nDisplaying image preview. Press any key to exit...")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+
 
 
 def run_video_mode(
@@ -231,7 +233,6 @@ def run_video_mode(
     fps_history = []
     tracker = PotholeTracker(min_hits=min(3, max(1, total_frames // 15)))
     critical_tracker = CriticalPotholeTracker(hysteresis_margin=0.10)
-    sidebar_mgr = ThumbnailSidebarManager(maxlen=5, main_view_ratio=0.72)
     last_result = None
     last_whatsapp_msg = None
     last_whatsapp_time = 0.0
@@ -240,7 +241,7 @@ def run_video_mode(
 
     if not no_view:
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(config.WINDOW_TITLE, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        cv2.resizeWindow(config.WINDOW_TITLE, width, height)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -270,9 +271,8 @@ def run_video_mode(
                     tracker.update(result.detections, width, height)
                     last_result = result
 
-                # Update critical pothole tracker and thumbnail sidebar
+                # Update critical pothole tracker
                 critical_id = critical_tracker.update(result.detections)
-                sidebar_mgr.push_detections(frame, result.detections, frame_idx)
 
                 total_potholes_found += result.count
 
@@ -309,15 +309,8 @@ def run_video_mode(
                     whatsapp_msg=active_wa_msg,
                     critical_id=critical_id,
                 )
-                # Save clean annotated frame (original resolution, no sidebar)
+                # Save clean annotated frame (original resolution)
                 writer.write(annotated_frame)
-
-                # Build composite display: 70% main + 30% sidebar
-                frame_h, frame_w = annotated_frame.shape[:2]
-                # sidebar_mgr.main_view_ratio=0.72 → sidebar is ~28% of total width
-                sidebar_w = max(160, int(frame_w * (1.0 - sidebar_mgr.main_view_ratio) / sidebar_mgr.main_view_ratio))
-                sidebar = sidebar_mgr.render_sidebar(sidebar_w, frame_h)
-                display_frame = combine_views(annotated_frame, sidebar)
 
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=video_path.name, frame_idx=frame_idx)
@@ -331,7 +324,7 @@ def run_video_mode(
                 )
 
                 if not no_view:
-                    cv2.imshow(config.WINDOW_TITLE, display_frame)
+                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
@@ -406,7 +399,6 @@ def run_webcam_mode(
     fps_history = []
     tracker = PotholeTracker(min_hits=3)
     critical_tracker = CriticalPotholeTracker(hysteresis_margin=0.10)
-    sidebar_mgr = ThumbnailSidebarManager(maxlen=5, main_view_ratio=0.72)
     last_result = None
     last_whatsapp_msg = None
     last_whatsapp_time = 0.0
@@ -414,7 +406,10 @@ def run_webcam_mode(
 
     if not no_view:
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(config.WINDOW_TITLE, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        # Set initial window size from camera; falls back to 1280x720 if unavailable
+        _cam_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+        _cam_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+        cv2.resizeWindow(config.WINDOW_TITLE, _cam_w, _cam_h)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -441,9 +436,8 @@ def run_webcam_mode(
                     tracker.update(result.detections, w, h)
                     last_result = result
 
-                # Update critical pothole tracker and thumbnail sidebar
+                # Update critical pothole tracker
                 critical_id = critical_tracker.update(result.detections)
-                sidebar_mgr.push_detections(frame, result.detections, frame_idx)
 
                 total_potholes_found += result.count
 
@@ -481,13 +475,6 @@ def run_webcam_mode(
                     critical_id=critical_id,
                 )
 
-                # Build composite display: 70% main + 30% sidebar
-                frame_h, frame_w = annotated_frame.shape[:2]
-                # sidebar_mgr.main_view_ratio=0.72 → sidebar is ~28% of total width
-                sidebar_w = max(160, int(frame_w * (1.0 - sidebar_mgr.main_view_ratio) / sidebar_mgr.main_view_ratio))
-                sidebar = sidebar_mgr.render_sidebar(sidebar_w, frame_h)
-                display_frame = combine_views(annotated_frame, sidebar)
-
                 if save_log and result.count > 0:
                     save_detection_log(result, source_name=f"webcam:{cam_idx}", frame_idx=frame_idx)
 
@@ -500,7 +487,7 @@ def run_webcam_mode(
                 )
 
                 if not no_view:
-                    cv2.imshow(config.WINDOW_TITLE, display_frame)
+                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
