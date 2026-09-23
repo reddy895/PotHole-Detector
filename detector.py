@@ -2,7 +2,7 @@
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -11,6 +11,12 @@ import numpy as np
 from ultralytics import YOLO
 
 from config import config
+from utils.civil_metrics import (
+    TIER_COLORS,
+    TIER_SHORT,
+    compute_civil_metrics,
+    rhi_color,
+)
 from utils.ui_composer import (
     calculate_pothole_areas,
     combine_views,
@@ -39,6 +45,12 @@ class PotholeDetection:
     frame_width: int = 0
     frame_height: int = 0
     track_id: Optional[int] = None
+    # ---- Civil engineering metrics (populated by detect() when available) ----
+    depth_cm: float = 0.0         # estimated crater depth in cm
+    area_real_m2: float = 0.0     # estimated real-world surface area (m²)
+    volume_m3: float = 0.0        # estimated crater volume (m³)
+    weight_kg: float = 0.0        # cold-mix asphalt patch weight (kg)
+    tier: str = "Unknown"         # civil severity tier: "Tier 1/2/3"
 
     @property
     def bbox(self) -> Tuple[int, int, int, int]:
@@ -151,6 +163,7 @@ class PotholeDetector:
         model_path: Optional[str | Path] = None,
         confidence_threshold: Optional[float] = None,
         iou_threshold: Optional[float] = None,
+        tracking_mode: bool = False,
     ):
         self.model_path = Path(model_path) if model_path else config.MODEL_PATH
         self.confidence_threshold = (
@@ -161,6 +174,10 @@ class PotholeDetector:
         )
         self.device = config.get_device()
         self.device_name = config.get_device_name()
+
+        # When True, detect() calls model.track(persist=True) with ByteTrack
+        # instead of model.predict(), providing persistent cross-frame track IDs.
+        self.tracking_mode: bool = tracking_mode
 
         # Smoothed FPS — initialised to 0 until first inference runs
         self._fps_ema: float = 0.0
@@ -199,7 +216,15 @@ class PotholeDetector:
         self._alert_handlers.append(handler)
 
     def detect(self, frame: np.ndarray) -> DetectionResult:
-        """Execute inference on a single BGR image frame.
+        """Execute inference (or tracking) on a single BGR image frame.
+
+        When ``self.tracking_mode`` is ``True``, uses ``model.track()`` with
+        ``persist=True`` and the ByteTrack algorithm to obtain persistent
+        cross-frame track IDs.  Falls back to ``model.predict()`` gracefully
+        if the tracker is unavailable.
+
+        Civil engineering metrics (depth, volume, weight, tier) are computed
+        inline for every detection without any disk I/O.
 
         Args:
             frame: OpenCV BGR image (H×W×3 uint8).
@@ -213,15 +238,38 @@ class PotholeDetector:
         frame_height, frame_width = frame.shape[:2]
         start_time = time.perf_counter()
 
-        # Run YOLO inference (image size auto-selected for device: 320 on CPU, 640 on GPU)
-        raw_results = self.model.predict(
-            source=frame,
-            conf=self.confidence_threshold,
-            iou=self.iou_threshold,
-            imgsz=config.get_image_size(),
-            device=self.device,
-            verbose=False,
-        )
+        # ---- YOLO inference: track or predict depending on mode ----
+        if self.tracking_mode:
+            try:
+                raw_results = self.model.track(
+                    source=frame,
+                    conf=self.confidence_threshold,
+                    iou=self.iou_threshold,
+                    imgsz=config.get_image_size(),
+                    device=self.device,
+                    verbose=False,
+                    persist=True,          # maintain tracker state across frames
+                    tracker="bytetrack.yaml",
+                )
+            except Exception:
+                # Graceful fallback if bytetrack.yaml is unavailable
+                raw_results = self.model.predict(
+                    source=frame,
+                    conf=self.confidence_threshold,
+                    iou=self.iou_threshold,
+                    imgsz=config.get_image_size(),
+                    device=self.device,
+                    verbose=False,
+                )
+        else:
+            raw_results = self.model.predict(
+                source=frame,
+                conf=self.confidence_threshold,
+                iou=self.iou_threshold,
+                imgsz=config.get_image_size(),
+                device=self.device,
+                verbose=False,
+            )
 
         elapsed = time.perf_counter() - start_time
         inference_time_ms = elapsed * 1000.0
@@ -229,7 +277,7 @@ class PotholeDetector:
 
         # Exponential Moving Average smoothing: avoids single-frame FPS spikes
         if self._fps_ema == 0.0:
-            self._fps_ema = raw_fps  # seed with first value
+            self._fps_ema = raw_fps
         else:
             self._fps_ema = (
                 self._FPS_EMA_ALPHA * raw_fps + (1.0 - self._FPS_EMA_ALPHA) * self._fps_ema
@@ -244,24 +292,33 @@ class PotholeDetector:
             boxes = result.boxes
 
             if boxes is not None and len(boxes) > 0:
-                xyxy = boxes.xyxy.cpu().numpy()
-                confs = boxes.conf.cpu().numpy()
+                xyxy    = boxes.xyxy.cpu().numpy()
+                confs   = boxes.conf.cpu().numpy()
                 cls_ids = boxes.cls.cpu().numpy().astype(int)
 
-                for box, score, class_id in zip(xyxy, confs, cls_ids, strict=False):
+                # ByteTrack track IDs — None tensor means tracking unavailable
+                if self.tracking_mode and boxes.id is not None:
+                    track_ids = boxes.id.cpu().numpy().astype(int).tolist()
+                else:
+                    track_ids = [None] * len(xyxy)
+
+                for box, score, class_id, tid in zip(
+                    xyxy, confs, cls_ids, track_ids, strict=False
+                ):
                     x1, y1, x2, y2 = [int(v) for v in box]
-                    # Clamp coordinates to valid frame bounds
-                    x1 = max(0, min(x1, frame_width - 1))
-                    y1 = max(0, min(y1, frame_height - 1))
-                    x2 = max(0, min(x2, frame_width - 1))
-                    y2 = max(0, min(y2, frame_height - 1))
+                    # Strict clamping to prevent any boundary slice crash
+                    x1 = int(np.clip(x1, 0, frame_width  - 1))
+                    y1 = int(np.clip(y1, 0, frame_height - 1))
+                    x2 = int(np.clip(x2, 1, frame_width))
+                    y2 = int(np.clip(y2, 1, frame_height))
 
                     score_val = float(score)
                     confidences.append(score_val)
 
-                    conf_pct = int(round(score_val * 100))
-                    label = f"Pothole {conf_pct}%"
+                    # ---- Civil engineering metrics ----
+                    metrics = compute_civil_metrics(x1, y1, x2, y2, frame_height)
 
+                    conf_pct   = int(round(score_val * 100))
                     class_name = "Pothole"
                     if hasattr(self.model, "names") and self.model.names:
                         class_name = self.model.names.get(class_id, "Pothole")
@@ -272,9 +329,15 @@ class PotholeDetector:
                             confidence=score_val,
                             class_id=int(class_id),
                             class_name=class_name,
-                            label=label,
+                            label=f"Pothole {conf_pct}%",
                             frame_width=frame_width,
                             frame_height=frame_height,
+                            track_id=int(tid) if tid is not None else None,
+                            depth_cm=metrics["depth_cm"],
+                            area_real_m2=metrics["area_real_m2"],
+                            volume_m3=metrics["volume_m3"],
+                            weight_kg=metrics["weight_kg"],
+                            tier=metrics["tier"],
                         )
                     )
 
@@ -307,37 +370,35 @@ class PotholeDetector:
         override_fps: Optional[float] = None,
         whatsapp_msg: Optional[str] = None,
         critical_id: Optional[int] = None,
+        rhi: Optional[int] = None,
+        total_logged: int = 0,
     ) -> np.ndarray:
-        """Draw bounding boxes, severity labels, corner accents, and HUD overlay.
+        """Draw industrial-grade bounding boxes, tier labels, map-pin, and HUD.
 
         Args:
-            frame: OpenCV BGR image.
-            result: DetectionResult from :meth:`detect`.
-            show_hud: Render the count/FPS status bar in the top corners.
-            total_count: Cumulative unique potholes detected across video stream.
-            override_fps: Optional custom FPS to display on HUD.
-            whatsapp_msg: Optional WhatsApp alert text to display on-screen.
-            critical_id: Optional track_id of the pothole to render in
-                "CRITICAL / LARGEST" style (thick red border + warning label).
-                Supplied by :class:`~utils.ui_composer.CriticalPotholeTracker`.
+            frame:        OpenCV BGR image.
+            result:       DetectionResult from :meth:`detect`.
+            show_hud:     Render the translucent top HUD banner.
+            total_count:  Total unique potholes (active + logged).
+            override_fps: Custom FPS to display (overrides result.fps).
+            whatsapp_msg: Optional WhatsApp dispatch message for bottom bar.
+            critical_id:  track_id of the largest pothole (gets map-pin).
+            rhi:          Road Health Index 0-100 (None = not computed yet).
+            total_logged: Number of permanently logged unique potholes.
 
         Returns:
             Annotated copy of the input frame (does not modify in-place).
         """
         annotated = frame.copy()
         height, width = annotated.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
 
-        # Severity colour coding (BGR)
-        _SEVERITY_COLORS = {
-            "Low":     (0, 200, 80),    # green
-            "Medium":  (0, 165, 255),   # orange
-            "High":    (0, 30, 220),    # red
-            "Unknown": (20, 120, 255),  # default blue
-        }
-
-        # Pulsing flag for the critical pothole (alternates every ~0.4 s)
+        # Pulsing flag (alternates every ~0.4 s) used for critical pothole
         _pulse_on = (int(time.time() * 2.5) % 2) == 0
 
+        # ================================================================
+        # 1.  Per-detection bounding boxes, labels, map-pin
+        # ================================================================
         for det in result.detections:
             x1, y1, x2, y2 = det.x1, det.y1, det.x2, det.y2
             is_critical = (
@@ -346,73 +407,58 @@ class PotholeDetector:
                 and det.track_id == critical_id
             )
 
+            tier_col = TIER_COLORS.get(det.tier, config.BOX_COLOR)
+
             if is_critical:
-                # ---- Critical pothole: thick double-border red styling ----
-                CRIT_OUTER = (0, 0, 200)    # deep red outer rect
-                CRIT_INNER = (20, 20, 255)  # bright red inner rect
-                CRIT_ACCENT = (0, 0, 255)   # corner accent color
+                # ---- Critical: thick pulsing red double-border + map-pin ----
+                CRIT_OUTER  = (0, 0, 200)
+                CRIT_INNER  = (20, 20, 255)
+                CRIT_ACCENT = (0, 0, 255)
                 outer_thick = 5
-                inner_thick = 2
                 inner_offset = outer_thick + 1
 
-                # Outer rect (always on)
-                cv2.rectangle(
-                    annotated, (x1, y1), (x2, y2),
-                    CRIT_OUTER, outer_thick, cv2.LINE_AA,
-                )
-                # Inner rect (pulsing)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2),
+                              CRIT_OUTER, outer_thick, cv2.LINE_AA)
                 if _pulse_on:
-                    ix1 = max(0, x1 + inner_offset)
-                    iy1 = max(0, y1 + inner_offset)
-                    ix2 = min(width - 1, x2 - inner_offset)
-                    iy2 = min(height - 1, y2 - inner_offset)
+                    ix1 = int(np.clip(x1 + inner_offset, 0, width  - 1))
+                    iy1 = int(np.clip(y1 + inner_offset, 0, height - 1))
+                    ix2 = int(np.clip(x2 - inner_offset, 1, width))
+                    iy2 = int(np.clip(y2 - inner_offset, 1, height))
                     if ix2 > ix1 and iy2 > iy1:
-                        cv2.rectangle(
-                            annotated, (ix1, iy1), (ix2, iy2),
-                            CRIT_INNER, inner_thick, cv2.LINE_AA,
-                        )
+                        cv2.rectangle(annotated, (ix1, iy1), (ix2, iy2),
+                                      CRIT_INNER, 2, cv2.LINE_AA)
 
-                # Critical corner accents (longer, thicker)
-                corner_len = min(28, max(10, int(min(x2 - x1, y2 - y1) * 0.25)))
-                accent_t = outer_thick + 1
-                cv2.line(annotated, (x1, y1), (x1 + corner_len, y1), CRIT_ACCENT, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x1, y1), (x1, y1 + corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y1), (x2 - corner_len, y1), CRIT_ACCENT, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y1), (x2, y1 + corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x1, y2), (x1 + corner_len, y2), CRIT_ACCENT, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x1, y2), (x1, y2 - corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), CRIT_ACCENT, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), CRIT_ACCENT, accent_t, cv2.LINE_AA)
+                # Critical corner accents
+                cl = min(28, max(10, int(min(x2 - x1, y2 - y1) * 0.25)))
+                at = outer_thick + 1
+                for (ax, ay, bx, by) in [
+                    (x1, y1, x1 + cl, y1), (x1, y1, x1, y1 + cl),
+                    (x2, y1, x2 - cl, y1), (x2, y1, x2, y1 + cl),
+                    (x1, y2, x1 + cl, y2), (x1, y2, x1, y2 - cl),
+                    (x2, y2, x2 - cl, y2), (x2, y2, x2, y2 - cl),
+                ]:
+                    cv2.line(annotated, (ax, ay), (bx, by), CRIT_ACCENT, at, cv2.LINE_AA)
 
-                # ---- Map-pin marker drawn above the bounding box centre ----
-                # pin_cx is the horizontal centre of the box; pin touches the top edge
+                # ---- Map-pin marker above bounding box centre ----
                 pin_cx = (x1 + x2) // 2
-                pin_r = 14          # radius of the circular pin head
-                pin_stem = 16       # length of the stem below the circle
-                # keep the whole pin on-screen
+                pin_r  = 14
+                pin_stem = 16
                 pin_head_cy = max(pin_r + 2, y1 - pin_stem - pin_r)
                 pin_tip_y   = min(height - 1, pin_head_cy + pin_r + pin_stem)
+                pin_fill = (0, 0, 230) if _pulse_on else (0, 0, 180)
 
-                # White halo so the pin is visible on any background
                 cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r + 3,
                            (255, 255, 255), -1, cv2.LINE_AA)
-                # Pulsing fill: brighter red when pulse is on
-                pin_fill = (0, 0, 230) if _pulse_on else (0, 0, 180)
                 cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r,
                            pin_fill, -1, cv2.LINE_AA)
-                # Dark hole in centre (pin eye)
                 cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r // 3,
                            (20, 20, 20), -1, cv2.LINE_AA)
-                # Stem: white border line then coloured line
                 cv2.line(annotated,
-                         (pin_cx, pin_head_cy + pin_r),
-                         (pin_cx, pin_tip_y),
+                         (pin_cx, pin_head_cy + pin_r), (pin_cx, pin_tip_y),
                          (255, 255, 255), 5, cv2.LINE_AA)
                 cv2.line(annotated,
-                         (pin_cx, pin_head_cy + pin_r),
-                         (pin_cx, pin_tip_y),
+                         (pin_cx, pin_head_cy + pin_r), (pin_cx, pin_tip_y),
                          pin_fill, 3, cv2.LINE_AA)
-                # Teardrop tip (small filled triangle at the bottom of the stem)
                 tip_pts = np.array([
                     [pin_cx - 5, pin_tip_y - 4],
                     [pin_cx + 5, pin_tip_y - 4],
@@ -420,147 +466,168 @@ class PotholeDetector:
                 ], dtype=np.int32)
                 cv2.fillPoly(annotated, [tip_pts], pin_fill, cv2.LINE_AA)
 
-                # Critical label with area stats
-                det_w = det.x2 - det.x1
-                det_h = det.y2 - det.y1
-                area_k = det.area / 1000.0
-                label = f"! CRITICAL / LARGEST  {det_w}x{det_h}px  Area:{area_k:.1f}k"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.58
-                font_thickness = 2
-                (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
-
-                pad_x, pad_y = 8, 6
-                # Place badge below the pin head so it doesn't overlap
-                badge_ref_y = max(pin_head_cy + pin_r + pin_stem, y1)
-                if badge_ref_y - (text_h + pad_y * 2 + 2) > 0:
-                    badge_y1 = badge_ref_y - (text_h + pad_y * 2 + 2)
-                    badge_y2 = badge_ref_y
-                    text_y = badge_ref_y - pad_y - 1
-                else:
-                    badge_y1 = y2
-                    badge_y2 = y2 + (text_h + pad_y * 2 + 2)
-                    text_y = y2 + text_h + pad_y + 1
-
-                badge_x1 = max(0, x1)
-                badge_x2 = min(width - 1, x1 + text_w + pad_x * 2)
-
-                # Badge background: deep red, with optional pulsing brightness
+                # Critical badge label
+                tier_s = TIER_SHORT.get(det.tier, det.tier)
+                label  = f"! LARGEST | {tier_s} | {det.depth_cm:.1f}cm | {det.weight_kg:.1f}kg"
                 badge_bg = (0, 0, 180) if _pulse_on else (0, 0, 140)
-                cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), badge_bg, -1)
-                # thin highlight border on badge
-                cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), CRIT_INNER, 1)
-                cv2.putText(
-                    annotated, label, (badge_x1 + pad_x, text_y),
-                    font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA,
-                )
-
+                badge_col = CRIT_INNER
 
             else:
-                # ---- Normal pothole: existing severity-colour styling ----
-                box_color = _SEVERITY_COLORS.get(det.severity, config.BOX_COLOR)
+                # ---- Normal: tier-coloured box with corner accents ----
+                cv2.rectangle(annotated, (x1, y1), (x2, y2),
+                              tier_col, config.BOX_THICKNESS, cv2.LINE_AA)
 
-                cv2.rectangle(
-                    annotated, (x1, y1), (x2, y2),
-                    box_color, config.BOX_THICKNESS, cv2.LINE_AA,
+                cl = min(18, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
+                at = config.BOX_THICKNESS + 1
+                acc = config.CORNER_ACCENT_COLOR
+                for (ax, ay, bx, by) in [
+                    (x1, y1, x1 + cl, y1), (x1, y1, x1, y1 + cl),
+                    (x2, y1, x2 - cl, y1), (x2, y1, x2, y1 + cl),
+                    (x1, y2, x1 + cl, y2), (x1, y2, x1, y2 - cl),
+                    (x2, y2, x2 - cl, y2), (x2, y2, x2, y2 - cl),
+                ]:
+                    cv2.line(annotated, (ax, ay), (bx, by), acc, at, cv2.LINE_AA)
+
+                # Normal badge label: #ID TierX | depth | weight | conf%
+                tid_s  = f"#{det.track_id} " if det.track_id is not None else ""
+                tier_s = TIER_SHORT.get(det.tier, "?")
+                label  = (
+                    f"{tid_s}{tier_s} | "
+                    f"{det.depth_cm:.1f}cm | "
+                    f"{det.weight_kg:.1f}kg | "
+                    f"{det.confidence * 100:.0f}%"
                 )
+                badge_bg  = tier_col
+                badge_col = tier_col
 
-                # High-visibility corner accents
-                corner_len = min(18, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
-                accent_c = config.CORNER_ACCENT_COLOR
-                accent_t = config.BOX_THICKNESS + 1
-                cv2.line(annotated, (x1, y1), (x1 + corner_len, y1), accent_c, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x1, y1), (x1, y1 + corner_len), accent_c, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y1), (x2 - corner_len, y1), accent_c, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y1), (x2, y1 + corner_len), accent_c, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x1, y2), (x1 + corner_len, y2), accent_c, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x1, y2), (x1, y2 - corner_len), accent_c, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y2), (x2 - corner_len, y2), accent_c, accent_t, cv2.LINE_AA)
-                cv2.line(annotated, (x2, y2), (x2, y2 - corner_len), accent_c, accent_t, cv2.LINE_AA)
+            # ---- Shared badge rendering ----
+            font_scale    = 0.50
+            font_thickness = 2
+            (text_w, text_h), _ = cv2.getTextSize(
+                label, font, font_scale, font_thickness)
+            pad_x, pad_y = 6, 4
 
-                # Label badge: e.g. "#1 Pothole 87% [High]"
-                track_prefix = f"#{det.track_id} " if det.track_id is not None else ""
-                label = f"{track_prefix}{det.label} [{det.severity}]"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.60
-                font_thickness = 2
-                (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+            if y1 - (text_h + pad_y * 2) > 0:
+                badge_y1 = y1 - (text_h + pad_y * 2)
+                badge_y2 = y1
+                text_y   = y1 - pad_y
+            else:
+                badge_y1 = y2
+                badge_y2 = min(height - 1, y2 + text_h + pad_y * 2)
+                text_y   = y2 + text_h + pad_y
 
-                pad_x, pad_y = 6, 5
-                if y1 - (text_h + pad_y * 2) > 0:
-                    badge_y1 = y1 - (text_h + pad_y * 2)
-                    badge_y2 = y1
-                    text_y = y1 - pad_y
-                else:
-                    badge_y1 = y1
-                    badge_y2 = y1 + (text_h + pad_y * 2)
-                    text_y = y1 + text_h + pad_y
+            badge_x1 = max(0, x1)
+            badge_x2 = min(width - 1, x1 + text_w + pad_x * 2)
 
-                badge_x1 = x1
-                badge_x2 = min(width - 1, x1 + text_w + pad_x * 2)
+            cv2.rectangle(annotated, (badge_x1, badge_y1),
+                          (badge_x2, badge_y2), badge_bg, -1)
+            cv2.rectangle(annotated, (badge_x1, badge_y1),
+                          (badge_x2, badge_y2), badge_col, 1)
+            cv2.putText(annotated, label, (badge_x1 + pad_x, text_y),
+                        font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
 
-                cv2.rectangle(annotated, (badge_x1, badge_y1), (badge_x2, badge_y2), box_color, -1)
-                cv2.putText(
-                    annotated, label, (badge_x1 + pad_x, text_y),
-                    font, font_scale, config.LABEL_TEXT_COLOR, font_thickness, cv2.LINE_AA,
-                )
-
-        # HUD overlay
+        # ================================================================
+        # 2.  Industrial HUD — translucent top banner
+        # ================================================================
         if show_hud:
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            hud_bg = (18, 20, 24)
-            card_h = 36
-            margin = 12
+            BANNER_H = 58
+            margin   = 10
 
-            # Pothole count card (top-left)
-            if total_count is not None:
-                count_text = f"Potholes: {result.count} (Total: {total_count})"
-            else:
-                count_text = f"Potholes: {result.count}"
-            status_color = (40, 140, 255) if result.count > 0 else (80, 210, 80)
-            (cw, _), _ = cv2.getTextSize(count_text, font, 0.6, 2)
-            card_w = cw + 46
+            # Dark translucent overlay (75% opacity)
+            overlay = annotated.copy()
+            cv2.rectangle(overlay, (0, 0), (width, BANNER_H), (8, 10, 14), -1)
+            cv2.addWeighted(overlay, 0.78, annotated, 0.22, 0, annotated)
 
-            cv2.rectangle(annotated, (margin, margin), (margin + card_w, margin + card_h), hud_bg, -1)
-            cv2.rectangle(annotated, (margin, margin), (margin + card_w, margin + card_h), (60, 60, 60), 1)
-            cv2.circle(annotated, (margin + 16, margin + card_h // 2), 6, status_color, -1)
-            cv2.putText(
-                annotated, count_text, (margin + 32, margin + 24),
-                font, 0.6, (255, 255, 255), 2, cv2.LINE_AA,
-            )
+            # Thin accent line below banner
+            cv2.line(annotated, (0, BANNER_H), (width, BANNER_H), (50, 55, 70), 1)
 
-            # FPS card (top-right) — shows smoothed EMA value or pacing FPS
             display_fps = override_fps if override_fps is not None else result.fps
-            fps_text = f"FPS: {display_fps:.1f}"
-            (fw, _), _ = cv2.getTextSize(fps_text, font, 0.6, 2)
-            card2_w = fw + 32
-            x2_card = width - margin - card2_w
 
-            if x2_card > margin + card_w + 10:
-                cv2.rectangle(annotated, (x2_card, margin), (x2_card + card2_w, margin + card_h), hud_bg, -1)
-                cv2.rectangle(annotated, (x2_card, margin), (x2_card + card2_w, margin + card_h), (60, 60, 60), 1)
-                cv2.putText(
-                    annotated, fps_text, (x2_card + 16, margin + 24),
-                    font, 0.6, (240, 240, 240), 2, cv2.LINE_AA,
-                )
+            # ---- Tier breakdown counts ----
+            t1 = sum(1 for d in result.detections if d.tier == "Tier 1")
+            t2 = sum(1 for d in result.detections if d.tier == "Tier 2")
+            t3 = sum(1 for d in result.detections if d.tier == "Tier 3")
 
+            # ---- Left section: active hazards + tier breakdown ----
+            hazard_col = (40, 140, 255) if result.count > 0 else (80, 210, 80)
+            cv2.putText(annotated,
+                        f"Hazards: {result.count} active",
+                        (margin, 22), font, 0.58, hazard_col, 2, cv2.LINE_AA)
+
+            # Tier pips: small coloured dots + counts
+            pip_x = margin
+            pip_y = 46
+            for tier_label, count, col in [
+                ("T1", t1, TIER_COLORS["Tier 1"]),
+                ("T2", t2, TIER_COLORS["Tier 2"]),
+                ("T3", t3, TIER_COLORS["Tier 3"]),
+            ]:
+                cv2.circle(annotated, (pip_x + 5, pip_y - 4), 5, col, -1, cv2.LINE_AA)
+                pip_txt = f"{tier_label}:{count}"
+                cv2.putText(annotated, pip_txt, (pip_x + 14, pip_y),
+                            font, 0.40, col, 1, cv2.LINE_AA)
+                (pw, _), _ = cv2.getTextSize(pip_txt, font, 0.40, 1)
+                pip_x += pw + 28
+
+            # ---- Centre section: Logged + Total unique ----
+            logged_total = total_count if total_count is not None else result.count
+            log_text  = f"Logged: {total_logged}  Total: {logged_total}"
+            (lw, _), _ = cv2.getTextSize(log_text, font, 0.52, 2)
+            lx = max(pip_x + 20, (width - lw) // 2)
+            cv2.putText(annotated, log_text, (lx, 22),
+                        font, 0.52, (200, 210, 230), 2, cv2.LINE_AA)
+
+            # ---- Right section: FPS + RHI ----
+            fps_text = f"FPS {display_fps:.1f}"
+            (fw, _), _ = cv2.getTextSize(fps_text, font, 0.55, 2)
+            cv2.putText(annotated, fps_text,
+                        (width - fw - margin, 22),
+                        font, 0.55, (200, 210, 230), 2, cv2.LINE_AA)
+
+            if rhi is not None:
+                rhi_col  = rhi_color(rhi)
+                rhi_text = f"RHI: {rhi}"
+                # Small progress bar
+                bar_w    = 80
+                bar_h    = 8
+                bar_x    = width - bar_w - margin
+                bar_y    = 34
+                # Background track
+                cv2.rectangle(annotated,
+                              (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
+                              (40, 42, 50), -1)
+                # Filled portion
+                filled_w = max(1, int(bar_w * rhi / 100))
+                cv2.rectangle(annotated,
+                              (bar_x, bar_y), (bar_x + filled_w, bar_y + bar_h),
+                              rhi_col, -1)
+                # RHI label
+                (rw, _), _ = cv2.getTextSize(rhi_text, font, 0.48, 1)
+                cv2.putText(annotated, rhi_text,
+                            (bar_x - rw - 6, bar_y + bar_h),
+                            font, 0.48, rhi_col, 1, cv2.LINE_AA)
+
+            # ---- WhatsApp alert bar (bottom) ----
             if whatsapp_msg:
-                msg_font_scale = 0.55
-                (mw, mh), _ = cv2.getTextSize(whatsapp_msg, font, msg_font_scale, 2)
-                card3_h = 36
-                card3_w = mw + 36
-                card3_x = max(margin, (width - card3_w) // 2)
-                card3_y = height - margin - card3_h
-
-                cv2.rectangle(annotated, (card3_x, card3_y), (card3_x + card3_w, card3_y + card3_h), (16, 40, 20), -1)
-                cv2.rectangle(annotated, (card3_x, card3_y), (card3_x + card3_w, card3_y + card3_h), (40, 210, 80), 2)
-                cv2.putText(
-                    annotated, whatsapp_msg, (card3_x + 18, card3_y + 24),
-                    font, msg_font_scale, (220, 255, 220), 2, cv2.LINE_AA,
-                )
+                msg_scale = 0.50
+                (mw, mh), _ = cv2.getTextSize(whatsapp_msg, font, msg_scale, 2)
+                bar3_h = 34
+                bar3_w = mw + 32
+                bar3_x = max(margin, (width - bar3_w) // 2)
+                bar3_y = height - margin - bar3_h
+                cv2.rectangle(annotated,
+                              (bar3_x, bar3_y),
+                              (bar3_x + bar3_w, bar3_y + bar3_h),
+                              (14, 38, 18), -1)
+                cv2.rectangle(annotated,
+                              (bar3_x, bar3_y),
+                              (bar3_x + bar3_w, bar3_y + bar3_h),
+                              (40, 210, 80), 2)
+                cv2.putText(annotated, whatsapp_msg,
+                            (bar3_x + 16, bar3_y + 22),
+                            font, msg_scale, (210, 255, 210), 2, cv2.LINE_AA)
 
         return annotated
-
 
 class ThreadedInferencePipeline:
     """Runs YOLO inference in a background thread so video I/O never stalls.

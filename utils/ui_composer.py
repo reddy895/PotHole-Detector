@@ -56,177 +56,195 @@ def calculate_pothole_areas(boxes: List) -> List[int]:
 
 
 def create_thumbnail_sidebar(
-    crops_queue: Deque[Dict],
+    crops_queue,
     sidebar_width: int,
     frame_height: int,
-) -> np.ndarray:
-    """Render the right-side thumbnail sidebar panel.
+):
+    """Render the right-side inspection-log sidebar panel (Pillar 3).
 
-    Each slot shows a pothole crop with confidence, area, and frame-index
-    overlaid in a clean dark-on-white badge style.  Empty slots are filled
-    with a subtle placeholder pattern.
+    Each card shows a letterboxed pothole crop (aspect-ratio preserved,
+    dark slate padding) plus civil engineering metadata:
+      - ``ID: #N | TierX``  (tier-colour coded)
+      - ``Asphalt: X.Xkg``   (estimated patch weight)
+      - ``XX%``              (detection confidence)
+
+    Empty slots display a "Scanning road surface..." centred placeholder.
 
     Args:
-        crops_queue: A ``collections.deque`` of crop dicts produced by
-            :class:`ThumbnailSidebarManager`.  Each dict has keys:
-            ``crop`` (BGR ndarray), ``frame_idx`` (int),
-            ``confidence`` (float 0-1), ``area`` (int px²),
-            ``timestamp`` (float epoch seconds).
-        sidebar_width: Pixel width of the rendered sidebar panel.
+        crops_queue: Deque of crop dicts from ``InspectionRegistry``.
+            Keys: ``crop``, ``track_id``, ``tier``, ``weight_kg``,
+            ``depth_cm``, ``confidence``.
+        sidebar_width: Pixel width of the rendered sidebar.
         frame_height: Pixel height to match the main frame.
 
     Returns:
         BGR uint8 ndarray of shape ``(frame_height, sidebar_width, 3)``.
     """
-    # ---- constants --------------------------------------------------------
-    MAX_SLOTS = 5
-    SLOT_H = max(1, frame_height // MAX_SLOTS)
-    BG_COLOR = (18, 20, 26)          # very dark navy
-    HEADER_BG = (28, 32, 42)         # slightly lighter for header bar
-    DIVIDER_COLOR = (50, 55, 70)
-    ACCENT_CYAN = (210, 200, 20)     # BGR → warm gold for header text
-    TEXT_WHITE = (230, 235, 245)
-    TEXT_DIM = (130, 140, 160)
-    CONF_GREEN = (60, 200, 100)
-    AREA_ORANGE = (60, 160, 255)     # BGR orange
+    from utils.civil_metrics import TIER_COLORS, TIER_SHORT
+
+    # ---- layout constants ------------------------------------------------
+    MAX_SLOTS = 4
+    HEADER_H  = 38
+    FOOTER_H  = 22
+    CARD_PAD  = 4
+    INFO_H    = 44    # pixels reserved below thumbnail for text
+
+    SLOT_H = max(1, (frame_height - HEADER_H - FOOTER_H) // MAX_SLOTS)
+
+    # ---- colour palette --------------------------------------------------
+    BG_COLOR   = (14,  16,  22)   # very dark navy
+    HEADER_BG  = (22,  26,  36)
+    DIVIDER    = (45,  50,  66)
+    ACCENT     = (30, 210, 200)   # teal
+    SLATE      = (30,  30,  30)   # letterbox padding colour
+    TEXT_DIM   = (110, 120, 140)
+    CONF_GRN   = (60, 200, 100)
+    WEIGHT_ORG = (50, 155, 255)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_sm = 0.42
-    font_xs = 0.36
-    thick1 = 1
-    thick2 = 2
+    fsm  = 0.38    # small
+    fxs  = 0.33    # extra-small
+    th1  = 1
 
     canvas = np.full((frame_height, sidebar_width, 3), BG_COLOR, dtype=np.uint8)
 
     # ---- header bar -------------------------------------------------------
-    header_h = 36
-    cv2.rectangle(canvas, (0, 0), (sidebar_width, header_h), HEADER_BG, -1)
-    cv2.rectangle(canvas, (0, header_h - 1), (sidebar_width, header_h), DIVIDER_COLOR, 1)
+    cv2.rectangle(canvas, (0, 0), (sidebar_width, HEADER_H), HEADER_BG, -1)
+    cv2.line(canvas, (0, HEADER_H - 1), (sidebar_width, HEADER_H - 1), DIVIDER, 1)
 
-    title = "DETECTED POTHOLES"
-    (tw, _), _ = cv2.getTextSize(title, font, font_sm, thick2)
+    title = "INSPECTION LOG"
+    (tw, _), _ = cv2.getTextSize(title, font, 0.42, 2)
     tx = max(4, (sidebar_width - tw) // 2)
-    cv2.putText(canvas, title, (tx, 24), font, font_sm, ACCENT_CYAN, thick2, cv2.LINE_AA)
+    cv2.putText(canvas, title, (tx, 24), font, 0.42, ACCENT, 2, cv2.LINE_AA)
 
-    # count badge
-    count_str = f"{len(crops_queue)}/{MAX_SLOTS}"
-    (cw, _), _ = cv2.getTextSize(count_str, font, font_xs, thick1)
-    cv2.putText(canvas, count_str, (sidebar_width - cw - 6, 22),
-                font, font_xs, TEXT_DIM, thick1, cv2.LINE_AA)
+    dot_on  = int(time.time()) % 2 == 0
+    dot_col = CONF_GRN if dot_on else TEXT_DIM
+    cv2.circle(canvas, (8, HEADER_H - 10), 4, dot_col, -1, cv2.LINE_AA)
+    cv2.putText(canvas, "LIVE", (16, HEADER_H - 5),
+                font, fxs, dot_col, th1, cv2.LINE_AA)
 
-    # ---- slots ------------------------------------------------------------
-    crops_list = list(crops_queue)  # newest first (deque appendleft) or FIFO
+    # ---- card slots -------------------------------------------------------
+    crops_list = list(crops_queue)
 
     for slot in range(MAX_SLOTS):
-        y_top = header_h + slot * SLOT_H
-        y_bot = min(frame_height, y_top + SLOT_H)
-        slot_h = y_bot - y_top
-        if slot_h <= 0:
+        y_top  = HEADER_H + slot * SLOT_H
+        y_bot  = min(frame_height - FOOTER_H, y_top + SLOT_H)
+        card_h = y_bot - y_top
+        if card_h <= 0:
             break
 
-        # thin divider between slots
         if slot > 0:
-            cv2.line(canvas, (4, y_top), (sidebar_width - 4, y_top), DIVIDER_COLOR, 1)
+            cv2.line(canvas, (CARD_PAD, y_top),
+                     (sidebar_width - CARD_PAD, y_top), DIVIDER, 1)
 
-        if slot < len(crops_list):
-            entry = crops_list[-(slot + 1)]  # show most-recent at top
-            crop: np.ndarray = entry["crop"]
-            conf: float = entry["confidence"]
-            area: int = entry["area"]
-            fidx: int = entry["frame_idx"]
+        # Most-recent crop at top (reverse indexing)
+        rev_idx = len(crops_list) - 1 - slot
 
-            # ---- thumbnail image ------------------------------------------
-            thumb_h = max(1, slot_h - 38)  # leave room for text bar below
-            thumb_w = sidebar_width - 8    # 4px margin each side
+        if 0 <= rev_idx < len(crops_list):
+            entry    = crops_list[rev_idx]
+            crop     = entry.get("crop")
+            tid      = entry.get("track_id", -1)
+            tier     = entry.get("tier",      "Unknown")
+            wkg      = entry.get("weight_kg", 0.0)
+            conf     = entry.get("confidence", 0.0)
+            tier_col = TIER_COLORS.get(tier,  (160, 160, 160))
+            tier_s   = TIER_SHORT.get(tier,   "?")
+
+            # ---- letterboxed thumbnail ------------------------------------
+            thumb_h = max(1, card_h - INFO_H - CARD_PAD * 2)
+            thumb_w = sidebar_width - CARD_PAD * 2
+
             if crop is not None and crop.size > 0:
                 try:
-                    thumb = cv2.resize(crop, (thumb_w, thumb_h),
-                                       interpolation=cv2.INTER_LINEAR)
-                    # clamp paste region
-                    paste_y1 = y_top + 2
-                    paste_y2 = paste_y1 + thumb_h
-                    paste_y2 = min(frame_height, paste_y2)
-                    actual_h = paste_y2 - paste_y1
-                    if actual_h > 0:
-                        canvas[paste_y1:paste_y2, 4:4 + thumb_w] = thumb[:actual_h]
-                except cv2.error:
+                    ch, cw = crop.shape[:2]
+                    scale  = min(thumb_w / max(1, cw), thumb_h / max(1, ch))
+                    nw     = max(1, int(cw * scale))
+                    nh     = max(1, int(ch * scale))
+                    resized = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_LINEAR)
+
+                    lb = np.full((thumb_h, thumb_w, 3), SLATE, dtype=np.uint8)
+                    oy = (thumb_h - nh) // 2
+                    ox = (thumb_w - nw) // 2
+                    lb[oy:oy + nh, ox:ox + nw] = resized
+
+                    py1 = y_top + CARD_PAD
+                    py2 = min(frame_height - FOOTER_H, py1 + thumb_h)
+                    actual = py2 - py1
+                    if actual > 0:
+                        canvas[py1:py2, CARD_PAD:CARD_PAD + thumb_w] = lb[:actual]
+
+                    # Tier-coloured border around thumbnail
+                    cv2.rectangle(canvas,
+                                  (CARD_PAD, py1), (CARD_PAD + thumb_w - 1, py2 - 1),
+                                  tier_col, 1)
+                except Exception:
                     pass
 
-            # ---- info bar beneath thumbnail -------------------------------
-            info_y = min(frame_height - 2, y_bot - 34)
+            # ---- metadata bar below thumbnail -----------------------------
+            info_bg_y  = max(0, y_bot - INFO_H)
+            info_y_row1 = info_bg_y + 14
+            info_y_row2 = info_bg_y + 30
 
-            # dark backing for readability
-            bar_top = max(0, info_y - 2)
-            bar_bot = min(frame_height, y_bot - 1)
-            cv2.rectangle(canvas, (0, bar_top), (sidebar_width, bar_bot),
+            cv2.rectangle(canvas, (0, info_bg_y), (sidebar_width, y_bot),
                           (12, 14, 20), -1)
 
-            # Confidence
-            conf_str = f"Conf: {conf * 100:.0f}%"
-            cv2.putText(canvas, conf_str, (6, info_y + 12),
-                        font, font_xs, CONF_GREEN, thick1, cv2.LINE_AA)
+            # Row 1: ID + Tier (tier-coloured)
+            id_txt = f"ID: #{tid} | {tier_s}"
+            cv2.putText(canvas, id_txt, (CARD_PAD + 2, info_y_row1),
+                        font, fsm, tier_col, th1, cv2.LINE_AA)
 
-            # Area
-            area_k = area / 1000.0
-            area_str = f"Area: {area_k:.1f}k px"
-            (aw, _), _ = cv2.getTextSize(area_str, font, font_xs, thick1)
-            cv2.putText(canvas, area_str, (sidebar_width - aw - 4, info_y + 12),
-                        font, font_xs, AREA_ORANGE, thick1, cv2.LINE_AA)
-
-            # Frame index (bottom row)
-            fidx_str = f"Frame #{fidx}"
-            cv2.putText(canvas, fidx_str, (6, info_y + 26),
-                        font, font_xs, TEXT_DIM, thick1, cv2.LINE_AA)
-
-            # thin cyan border around thumbnail
-            thumb_border_y2 = min(frame_height - 1, info_y - 2)
-            cv2.rectangle(canvas, (3, y_top + 1), (sidebar_width - 4, thumb_border_y2),
-                          DIVIDER_COLOR, 1)
+            # Row 2: Asphalt weight left, confidence right
+            wkg_txt  = f"Asphalt: {wkg:.1f}kg"
+            conf_txt = f"{conf * 100:.0f}%"
+            (csw, _), _ = cv2.getTextSize(conf_txt, font, fxs, th1)
+            cv2.putText(canvas, wkg_txt, (CARD_PAD + 2, info_y_row2),
+                        font, fxs, WEIGHT_ORG, th1, cv2.LINE_AA)
+            cv2.putText(canvas, conf_txt,
+                        (sidebar_width - csw - CARD_PAD - 2, info_y_row2),
+                        font, fxs, CONF_GRN, th1, cv2.LINE_AA)
 
         else:
-            # ---- placeholder slot -----------------------------------------
-            cx = sidebar_width // 2
-            cy = y_top + slot_h // 2
+            # ---- empty slot placeholder -----------------------------------
+            cy   = y_top + card_h // 2 - 6
+            cx   = sidebar_width // 2
+            dash = (40, 45, 60)
 
-            # dashed border approximation (series of short lines)
-            dash_col = (45, 50, 65)
-            for dx in range(6, sidebar_width - 6, 10):
-                cv2.line(canvas, (dx, y_top + 3), (min(dx + 6, sidebar_width - 6), y_top + 3),
-                         dash_col, 1)
-                cv2.line(canvas, (dx, y_bot - 4), (min(dx + 6, sidebar_width - 6), y_bot - 4),
-                         dash_col, 1)
-            for dy in range(y_top + 6, y_bot - 6, 10):
-                cv2.line(canvas, (3, dy), (3, min(dy + 6, y_bot - 6)), dash_col, 1)
-                cv2.line(canvas, (sidebar_width - 4, dy),
-                         (sidebar_width - 4, min(dy + 6, y_bot - 6)), dash_col, 1)
+            for dx in range(CARD_PAD + 4, sidebar_width - CARD_PAD, 8):
+                se = min(dx + 4, sidebar_width - CARD_PAD - 1)
+                cv2.line(canvas, (dx, y_top + CARD_PAD), (se, y_top + CARD_PAD), dash, 1)
+                cv2.line(canvas, (dx, y_bot - CARD_PAD), (se, y_bot - CARD_PAD), dash, 1)
+            for dy in range(y_top + CARD_PAD, y_bot - CARD_PAD, 8):
+                se = min(dy + 4, y_bot - CARD_PAD - 1)
+                cv2.line(canvas, (CARD_PAD, dy), (CARD_PAD, se), dash, 1)
+                cv2.line(canvas, (sidebar_width - CARD_PAD - 1, dy),
+                         (sidebar_width - CARD_PAD - 1, se), dash, 1)
 
-            # scan icon (simple reticle)
-            r = min(18, slot_h // 4)
-            cv2.circle(canvas, (cx, cy - 6), r, dash_col, 1, cv2.LINE_AA)
-            cv2.line(canvas, (cx - r - 4, cy - 6), (cx + r + 4, cy - 6), dash_col, 1)
-            cv2.line(canvas, (cx, cy - r - 10), (cx, cy + r - 2), dash_col, 1)
+            r = min(12, card_h // 5)
+            cv2.circle(canvas, (cx, cy), r, dash, 1, cv2.LINE_AA)
+            cv2.line(canvas, (cx - r - 3, cy), (cx + r + 3, cy), dash, 1)
+            cv2.line(canvas, (cx, cy - r - 3), (cx, cy + r + 3), dash, 1)
 
-            # "scanning" text
-            scan_text = "Scanning..."
-            (stw, _), _ = cv2.getTextSize(scan_text, font, font_xs, thick1)
-            cv2.putText(canvas, scan_text, (cx - stw // 2, cy + r + 10),
-                        font, font_xs, TEXT_DIM, thick1, cv2.LINE_AA)
+            scan1 = "Scanning road"
+            scan2 = "surface..."
+            (sw1, _), _ = cv2.getTextSize(scan1, font, fxs, th1)
+            cv2.putText(canvas, scan1, (cx - sw1 // 2, cy + r + 14),
+                        font, fxs, TEXT_DIM, th1, cv2.LINE_AA)
+            cv2.putText(canvas, scan2, (cx - sw1 // 2, cy + r + 26),
+                        font, fxs, TEXT_DIM, th1, cv2.LINE_AA)
 
-    # ---- bottom status strip ----------------------------------------------
-    strip_y = frame_height - 22
-    if strip_y > header_h:
-        cv2.rectangle(canvas, (0, strip_y), (sidebar_width, frame_height), HEADER_BG, -1)
-        ts = time.strftime("%H:%M:%S")
-        cv2.putText(canvas, ts, (6, frame_height - 6),
-                    font, font_xs, TEXT_DIM, thick1, cv2.LINE_AA)
-
-        label_r = "FEED LIVE"
-        (lrw, _), _ = cv2.getTextSize(label_r, font, font_xs, thick1)
-        # blinking dot (odd second = on)
-        dot_color = CONF_GREEN if int(time.time()) % 2 == 0 else TEXT_DIM
-        cv2.circle(canvas, (sidebar_width - lrw - 18, frame_height - 10), 4, dot_color, -1)
-        cv2.putText(canvas, label_r, (sidebar_width - lrw - 6, frame_height - 6),
-                    font, font_xs, dot_color, thick1, cv2.LINE_AA)
+    # ---- footer strip -----------------------------------------------------
+    footer_y = frame_height - FOOTER_H
+    if footer_y > HEADER_H:
+        cv2.rectangle(canvas, (0, footer_y), (sidebar_width, frame_height),
+                      HEADER_BG, -1)
+        cv2.putText(canvas, time.strftime("%H:%M:%S"),
+                    (CARD_PAD, frame_height - 6),
+                    font, fxs, TEXT_DIM, th1, cv2.LINE_AA)
+        logged_txt = f"{len(crops_list)} logged"
+        (lw, _), _ = cv2.getTextSize(logged_txt, font, fxs, th1)
+        cv2.putText(canvas, logged_txt,
+                    (sidebar_width - lw - CARD_PAD, frame_height - 6),
+                    font, fxs, CONF_GRN, th1, cv2.LINE_AA)
 
     return canvas
 

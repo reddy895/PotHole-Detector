@@ -14,10 +14,14 @@ import cv2
 from config import config
 from detector import (
     PotholeDetector,
-    PotholeTracker,
     ThreadedInferencePipeline,
 )
-from utils.ui_composer import CriticalPotholeTracker
+from utils.civil_metrics import InspectionRegistry, calculate_rhi
+from utils.ui_composer import (
+    CriticalPotholeTracker,
+    combine_views,
+    create_thumbnail_sidebar,
+)
 from utils.video_utils import (
     create_video_writer,
     print_banner,
@@ -225,14 +229,15 @@ def run_video_mode(
         device_name=detector.device_name,
     )
     skip_info = f" | Frame-skip: {skip_frames}" if skip_frames > 0 else ""
-    print(f"Resolution: {width}x{height} | Frames: {total_frames} | Max 15 FPS | Recursive Loop (Full Screen){skip_info}")
+    print(f"Resolution: {width}x{height} | Frames: {total_frames} | Max 15 FPS | Recursive Loop | ByteTrack{skip_info}")
     print(f"Output: {out_path}\n")
 
     frame_idx = 0
     total_potholes_found = 0
     fps_history = []
-    tracker = PotholeTracker(min_hits=min(3, max(1, total_frames // 15)))
+    registry = InspectionRegistry(max_missing_frames=15, sidebar_capacity=4)
     critical_tracker = CriticalPotholeTracker(hysteresis_margin=0.10)
+    detector.tracking_mode = True   # enable ByteTrack persistent IDs
     last_result = None
     last_whatsapp_msg = None
     last_whatsapp_time = 0.0
@@ -241,7 +246,8 @@ def run_video_mode(
 
     if not no_view:
         cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(config.WINDOW_TITLE, width, height)
+        # Window sized for composite (main + 25% sidebar)
+        cv2.resizeWindow(config.WINDOW_TITLE, min(1600, width + width // 4), height)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -267,12 +273,12 @@ def run_video_mode(
                     # No result yet (very first frame) — run synchronously as fallback
                     result = detector.detect(frame)
 
-                if result is not last_result:
-                    tracker.update(result.detections, width, height)
-                    last_result = result
+                last_result = result
 
-                # Update critical pothole tracker
+                # Update critical pothole tracker + inspection registry + RHI
                 critical_id = critical_tracker.update(result.detections)
+                registry.update_frame(result.detections, frame)
+                rhi = calculate_rhi(result.detections)
 
                 total_potholes_found += result.count
 
@@ -293,9 +299,9 @@ def run_video_mode(
                         )
                         if sent:
                             track_str = f"#{det.track_id}" if det.track_id is not None else "N/A"
-                            last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.severity}]"
+                            last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.tier}]"
                             last_whatsapp_time = time.time()
-                            print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.severity}] ({det.confidence*100:.1f}%)")
+                            print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.tier}] ({det.confidence*100:.1f}%)")
                             break
 
                 active_wa_msg = last_whatsapp_msg if (time.time() - last_whatsapp_time) < 4.0 else None
@@ -304,12 +310,14 @@ def run_video_mode(
                     frame,
                     result,
                     show_hud=True,
-                    total_count=tracker.unique_count,
+                    total_count=registry.total_unique_count,
                     override_fps=current_fps,
                     whatsapp_msg=active_wa_msg,
                     critical_id=critical_id,
+                    rhi=rhi,
+                    total_logged=registry.unique_logged_count,
                 )
-                # Save clean annotated frame (original resolution)
+                # Save clean annotated frame at original resolution (no sidebar baked in)
                 writer.write(annotated_frame)
 
                 if save_log and result.count > 0:
@@ -319,12 +327,18 @@ def run_video_mode(
                     frame_idx=frame_idx % max(1, total_frames),
                     total_frames=total_frames,
                     fps=current_fps,
-                    current_potholes=tracker.unique_count,
-                    highest_confidence=tracker.highest_confidence,
+                    current_potholes=registry.total_unique_count,
+                    highest_confidence=result.max_confidence,
                 )
 
                 if not no_view:
-                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
+                    # Build 75/25 composite: main view + inspection log sidebar
+                    _fh, _fw = annotated_frame.shape[:2]
+                    _sb_w = max(200, _fw // 4)   # sidebar = 25% of main width
+                    _sidebar = create_thumbnail_sidebar(
+                        registry.crops_queue, _sb_w, _fh)
+                    _composite = combine_views(annotated_frame, _sidebar)
+                    cv2.imshow(config.WINDOW_TITLE, _composite)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
@@ -346,9 +360,9 @@ def run_video_mode(
         source_name=video_path.name,
         processed_frames=frame_idx,
         total_frames=total_frames,
-        unique_potholes=tracker.unique_count,
+        unique_potholes=registry.total_unique_count,
         total_instances=total_potholes_found,
-        highest_confidence=tracker.highest_confidence,
+        highest_confidence=registry.max_confidence,
         avg_fps=avg_fps,
         output_path=out_path,
         log_path=log_file,
@@ -397,8 +411,9 @@ def run_webcam_mode(
     frame_idx = 0
     total_potholes_found = 0
     fps_history = []
-    tracker = PotholeTracker(min_hits=3)
+    registry = InspectionRegistry(max_missing_frames=15, sidebar_capacity=4)
     critical_tracker = CriticalPotholeTracker(hysteresis_margin=0.10)
+    detector.tracking_mode = True   # enable ByteTrack persistent IDs
     last_result = None
     last_whatsapp_msg = None
     last_whatsapp_time = 0.0
@@ -432,12 +447,12 @@ def run_webcam_mode(
                 if result is None:
                     result = detector.detect(frame)
 
-                if result is not last_result:
-                    tracker.update(result.detections, w, h)
-                    last_result = result
+                last_result = result
 
-                # Update critical pothole tracker
+                # Update critical pothole tracker + inspection registry + RHI
                 critical_id = critical_tracker.update(result.detections)
+                registry.update_frame(result.detections, frame)
+                rhi = calculate_rhi(result.detections)
 
                 total_potholes_found += result.count
 
@@ -458,9 +473,9 @@ def run_webcam_mode(
                         )
                         if sent:
                             track_str = f"#{det.track_id}" if det.track_id is not None else "N/A"
-                            last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.severity}]"
+                            last_whatsapp_msg = f"WHATSAPP ALERT -> {notifier.authority_phone} | Pothole {track_str} [{det.tier}]"
                             last_whatsapp_time = time.time()
-                            print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.severity}] ({det.confidence*100:.1f}%)")
+                            print(f"\n📲 [WHATSAPP DISPATCH] Alert sent to {notifier.authority_phone} | Pothole {track_str} [{det.tier}] ({det.confidence*100:.1f}%)")
                             break
 
                 active_wa_msg = last_whatsapp_msg if (time.time() - last_whatsapp_time) < 4.0 else None
@@ -469,10 +484,12 @@ def run_webcam_mode(
                     frame,
                     result,
                     show_hud=True,
-                    total_count=tracker.unique_count,
+                    total_count=registry.total_unique_count,
                     override_fps=current_fps,
                     whatsapp_msg=active_wa_msg,
                     critical_id=critical_id,
+                    rhi=rhi,
+                    total_logged=registry.unique_logged_count,
                 )
 
                 if save_log and result.count > 0:
@@ -482,12 +499,18 @@ def run_webcam_mode(
                     frame_idx=frame_idx,
                     fps=current_fps,
                     current_count=result.count,
-                    total_unique=tracker.unique_count,
-                    highest_confidence=tracker.highest_confidence,
+                    total_unique=registry.total_unique_count,
+                    highest_confidence=result.max_confidence,
                 )
 
                 if not no_view:
-                    cv2.imshow(config.WINDOW_TITLE, annotated_frame)
+                    # Build 75/25 composite: main view + inspection log sidebar
+                    _fh, _fw = annotated_frame.shape[:2]
+                    _sb_w = max(200, _fw // 4)
+                    _sidebar = create_thumbnail_sidebar(
+                        registry.crops_queue, _sb_w, _fh)
+                    _composite = combine_views(annotated_frame, _sidebar)
+                    cv2.imshow(config.WINDOW_TITLE, _composite)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF
                     if key in (ord("q"), ord("Q"), 27):
@@ -508,9 +531,9 @@ def run_webcam_mode(
         source_name=f"Webcam ({cam_idx})",
         processed_frames=frame_idx,
         total_frames=frame_idx,
-        unique_potholes=tracker.unique_count,
+        unique_potholes=registry.total_unique_count,
         total_instances=total_potholes_found,
-        highest_confidence=tracker.highest_confidence,
+        highest_confidence=registry.max_confidence,
         avg_fps=avg_fps,
         log_path=log_file,
     )
