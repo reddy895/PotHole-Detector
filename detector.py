@@ -410,75 +410,37 @@ class PotholeDetector:
             tier_col = TIER_COLORS.get(det.tier, config.BOX_COLOR)
 
             if is_critical:
-                # ---- Critical: thick pulsing red double-border + map-pin ----
-                CRIT_OUTER  = (0, 0, 200)
-                CRIT_INNER  = (20, 20, 255)
-                CRIT_ACCENT = (0, 0, 255)
-                outer_thick = 5
-                inner_offset = outer_thick + 1
+                # ---- Critical: thin high-contrast red border + warning badge ----
+                CRIT_COLOR  = (20, 20, 255)   # Vivid red
+                CRIT_ACCENT = (0, 120, 255)   # Amber-orange accent
+                crit_thick  = 2               # Thin, distinct highlight
 
                 cv2.rectangle(annotated, (x1, y1), (x2, y2),
-                              CRIT_OUTER, outer_thick, cv2.LINE_AA)
-                if _pulse_on:
-                    ix1 = int(np.clip(x1 + inner_offset, 0, width  - 1))
-                    iy1 = int(np.clip(y1 + inner_offset, 0, height - 1))
-                    ix2 = int(np.clip(x2 - inner_offset, 1, width))
-                    iy2 = int(np.clip(y2 - inner_offset, 1, height))
-                    if ix2 > ix1 and iy2 > iy1:
-                        cv2.rectangle(annotated, (ix1, iy1), (ix2, iy2),
-                                      CRIT_INNER, 2, cv2.LINE_AA)
+                              CRIT_COLOR, crit_thick, cv2.LINE_AA)
 
-                # Critical corner accents
-                cl = min(28, max(10, int(min(x2 - x1, y2 - y1) * 0.25)))
-                at = outer_thick + 1
+                # Thin corner accents
+                cl = min(16, max(6, int(min(x2 - x1, y2 - y1) * 0.18)))
                 for (ax, ay, bx, by) in [
                     (x1, y1, x1 + cl, y1), (x1, y1, x1, y1 + cl),
                     (x2, y1, x2 - cl, y1), (x2, y1, x2, y1 + cl),
                     (x1, y2, x1 + cl, y2), (x1, y2, x1, y2 - cl),
                     (x2, y2, x2 - cl, y2), (x2, y2, x2, y2 - cl),
                 ]:
-                    cv2.line(annotated, (ax, ay), (bx, by), CRIT_ACCENT, at, cv2.LINE_AA)
-
-                # ---- Map-pin marker above bounding box centre ----
-                pin_cx = (x1 + x2) // 2
-                pin_r  = 14
-                pin_stem = 16
-                pin_head_cy = max(pin_r + 2, y1 - pin_stem - pin_r)
-                pin_tip_y   = min(height - 1, pin_head_cy + pin_r + pin_stem)
-                pin_fill = (0, 0, 230) if _pulse_on else (0, 0, 180)
-
-                cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r + 3,
-                           (255, 255, 255), -1, cv2.LINE_AA)
-                cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r,
-                           pin_fill, -1, cv2.LINE_AA)
-                cv2.circle(annotated, (pin_cx, pin_head_cy), pin_r // 3,
-                           (20, 20, 20), -1, cv2.LINE_AA)
-                cv2.line(annotated,
-                         (pin_cx, pin_head_cy + pin_r), (pin_cx, pin_tip_y),
-                         (255, 255, 255), 5, cv2.LINE_AA)
-                cv2.line(annotated,
-                         (pin_cx, pin_head_cy + pin_r), (pin_cx, pin_tip_y),
-                         pin_fill, 3, cv2.LINE_AA)
-                tip_pts = np.array([
-                    [pin_cx - 5, pin_tip_y - 4],
-                    [pin_cx + 5, pin_tip_y - 4],
-                    [pin_cx,     pin_tip_y + 4],
-                ], dtype=np.int32)
-                cv2.fillPoly(annotated, [tip_pts], pin_fill, cv2.LINE_AA)
+                    cv2.line(annotated, (ax, ay), (bx, by), CRIT_ACCENT, crit_thick, cv2.LINE_AA)
 
                 # Critical badge label
                 tier_s = TIER_SHORT.get(det.tier, det.tier)
                 label  = f"! LARGEST | {tier_s} | {det.depth_cm:.1f}cm | {det.weight_kg:.1f}kg"
-                badge_bg = (0, 0, 180) if _pulse_on else (0, 0, 140)
-                badge_col = CRIT_INNER
+                badge_bg  = (10, 10, 180) if _pulse_on else (10, 10, 140)
+                badge_col = CRIT_COLOR
 
             else:
-                # ---- Normal: tier-coloured box with corner accents ----
+                # ---- Normal: thin tier-coloured box with subtle corner accents ----
+                norm_thick = max(1, config.BOX_THICKNESS)
                 cv2.rectangle(annotated, (x1, y1), (x2, y2),
-                              tier_col, config.BOX_THICKNESS, cv2.LINE_AA)
+                              tier_col, norm_thick, cv2.LINE_AA)
 
-                cl = min(18, max(6, int(min(x2 - x1, y2 - y1) * 0.2)))
-                at = config.BOX_THICKNESS + 1
+                cl = min(12, max(5, int(min(x2 - x1, y2 - y1) * 0.15)))
                 acc = config.CORNER_ACCENT_COLOR
                 for (ax, ay, bx, by) in [
                     (x1, y1, x1 + cl, y1), (x1, y1, x1, y1 + cl),
@@ -486,7 +448,7 @@ class PotholeDetector:
                     (x1, y2, x1 + cl, y2), (x1, y2, x1, y2 - cl),
                     (x2, y2, x2 - cl, y2), (x2, y2, x2, y2 - cl),
                 ]:
-                    cv2.line(annotated, (ax, ay), (bx, by), acc, at, cv2.LINE_AA)
+                    cv2.line(annotated, (ax, ay), (bx, by), acc, norm_thick, cv2.LINE_AA)
 
                 # Normal badge label: #ID TierX | depth | weight | conf%
                 tid_s  = f"#{det.track_id} " if det.track_id is not None else ""
@@ -501,11 +463,11 @@ class PotholeDetector:
                 badge_col = tier_col
 
             # ---- Shared badge rendering ----
-            font_scale    = 0.50
-            font_thickness = 2
+            font_scale     = 0.42
+            font_thickness = 1
             (text_w, text_h), _ = cv2.getTextSize(
                 label, font, font_scale, font_thickness)
-            pad_x, pad_y = 6, 4
+            pad_x, pad_y = 5, 3
 
             if y1 - (text_h + pad_y * 2) > 0:
                 badge_y1 = y1 - (text_h + pad_y * 2)

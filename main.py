@@ -175,7 +175,8 @@ def run_image_mode(
     if not no_view:
         window_title = f"{config.WINDOW_TITLE} - {image_path.name}"
         ih, iw = annotated_frame.shape[:2]
-        cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
+        win_flags = cv2.WINDOW_NORMAL | getattr(cv2, "WINDOW_GUI_NORMAL", 0)
+        cv2.namedWindow(window_title, win_flags)
         cv2.resizeWindow(window_title, iw, ih)
         cv2.imshow(window_title, annotated_frame)
         print("\nDisplaying image preview. Press any key to exit...")
@@ -245,9 +246,11 @@ def run_video_mode(
     annotated_frame = None
 
     if not no_view:
-        cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
-        # Window sized for composite (main + 25% sidebar)
-        cv2.resizeWindow(config.WINDOW_TITLE, min(1600, width + width // 4), height)
+        win_flags = cv2.WINDOW_NORMAL | getattr(cv2, "WINDOW_GUI_NORMAL", 0)
+        cv2.namedWindow(config.WINDOW_TITLE, win_flags)
+        # Sized precisely for composite (main + sidebar + separator)
+        _init_sb_w = max(200, width // 4)
+        cv2.resizeWindow(config.WINDOW_TITLE, width + _init_sb_w + 2, height)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -338,6 +341,9 @@ def run_video_mode(
                     _sidebar = create_thumbnail_sidebar(
                         registry.crops_queue, _sb_w, _fh)
                     _composite = combine_views(annotated_frame, _sidebar)
+                    if frame_idx == 1:
+                        _ch, _cw = _composite.shape[:2]
+                        cv2.resizeWindow(config.WINDOW_TITLE, _cw, _ch)
                     cv2.imshow(config.WINDOW_TITLE, _composite)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF
@@ -420,11 +426,13 @@ def run_webcam_mode(
     annotated_frame = None
 
     if not no_view:
-        cv2.namedWindow(config.WINDOW_TITLE, cv2.WINDOW_NORMAL)
-        # Set initial window size from camera; falls back to 1280x720 if unavailable
+        win_flags = cv2.WINDOW_NORMAL | getattr(cv2, "WINDOW_GUI_NORMAL", 0)
+        cv2.namedWindow(config.WINDOW_TITLE, win_flags)
+        # Sized precisely for composite (main webcam + sidebar + separator)
         _cam_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
         _cam_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
-        cv2.resizeWindow(config.WINDOW_TITLE, _cam_w, _cam_h)
+        _init_sb_w = max(200, _cam_w // 4)
+        cv2.resizeWindow(config.WINDOW_TITLE, _cam_w + _init_sb_w + 2, _cam_h)
 
     try:
         with ThreadedInferencePipeline(detector) as pipe:
@@ -510,6 +518,9 @@ def run_webcam_mode(
                     _sidebar = create_thumbnail_sidebar(
                         registry.crops_queue, _sb_w, _fh)
                     _composite = combine_views(annotated_frame, _sidebar)
+                    if frame_idx == 1:
+                        _ch, _cw = _composite.shape[:2]
+                        cv2.resizeWindow(config.WINDOW_TITLE, _cw, _ch)
                     cv2.imshow(config.WINDOW_TITLE, _composite)
                     wait_ms = max(1, int(remaining_time * 1000)) if remaining_time > 0 else 1
                     key = cv2.waitKey(wait_ms) & 0xFF

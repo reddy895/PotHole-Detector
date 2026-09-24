@@ -76,7 +76,7 @@ class Config:
     # Visual bounding box styling (OpenCV BGR format)
     # Bright Tangerine / Safety Orange: (20, 120, 255) for high contrast against dark asphalt
     BOX_COLOR: tuple = (20, 120, 255)
-    BOX_THICKNESS: int = 3
+    BOX_THICKNESS: int = 1
     LABEL_BG_COLOR: tuple = (20, 120, 255)
     LABEL_TEXT_COLOR: tuple = (255, 255, 255)
     CORNER_ACCENT_COLOR: tuple = (0, 240, 255)  # Bright cyan/yellow accent for corners
